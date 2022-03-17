@@ -9,7 +9,6 @@
 
 ## 项目新闻 ##
 * 2021-01-20 Dragonboat v3.3 已发布，请查看[CHANGELOG](CHANGELOG.md)获知所有更新情况。
-* 2020-03-05 Dragonboat v3.2 已发布，请查看[CHANGELOG](CHANGELOG.md)获知详情。
 
 ## 关于 ##
 Dragonboat是一个高性能纯[Go](https://golang.org)语言实现的多组[Raft](https://raft.github.io/) [共识算法](https://en.wikipedia.org/wiki/Consensus_(computer_science))库。
