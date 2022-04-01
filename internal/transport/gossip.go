@@ -126,6 +126,7 @@ type gossipManager struct {
 func newGossipManager(nhid string,
 	nhConfig config.NodeHostConfig) (*gossipManager, error) {
 	cfg := memberlist.DefaultWANConfig()
+	cfg.Logger = newGossipLogWrapper()
 	cfg.Name = nhid
 	if nhConfig.Expert.TestGossipProbeInterval > 0 {
 		plog.Infof("gossip probe interval set to %s",
