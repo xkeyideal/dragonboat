@@ -44,6 +44,9 @@ func NewNodeHostIDRegistry(nhid string,
 		nodes:  NewNodeRegistry(streamConnections, v),
 		gossip: gossip,
 	}
+
+	gossip.d.raftAddress = nhConfig.RaftAddress
+	r.gossip.list.UpdateNode(2 * time.Second)
 	return r, nil
 }
 
@@ -118,6 +121,7 @@ func parseAddress(addr string) (string, int, error) {
 }
 
 type gossipManager struct {
+	d       *delegate
 	cfg     *memberlist.Config
 	list    *memberlist.Memberlist
 	stopper *syncutil.Stopper
@@ -147,7 +151,8 @@ func newGossipManager(nhid string,
 		cfg.AdvertiseAddr = aAddr
 		cfg.AdvertisePort = aPort
 	}
-	cfg.Delegate = &delegate{raftAddress: nhConfig.RaftAddress}
+	d := &delegate{raftAddress: nhConfig.RaftAddress}
+	cfg.Delegate = d
 	list, err := memberlist.Create(cfg)
 	if err != nil {
 		plog.Errorf("failed to create memberlist, %v", err)
@@ -156,6 +161,7 @@ func newGossipManager(nhid string,
 	seed := make([]string, 0, len(nhConfig.Gossip.Seed))
 	seed = append(seed, nhConfig.Gossip.Seed...)
 	g := &gossipManager{
+		d:       d,
 		cfg:     cfg,
 		list:    list,
 		stopper: syncutil.NewStopper(),
