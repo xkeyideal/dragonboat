@@ -20,8 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 // NoOP is a IStateMachine struct used for testing purpose.
@@ -46,17 +46,17 @@ func (n *NoOP) NALookup(key []byte) ([]byte, error) {
 }
 
 // Update updates the object.
-func (n *NoOP) Update(data []byte) (sm.Result, error) {
+func (n *NoOP) Update(e sm.Entry) (sm.Result, error) {
 	sleep := atomic.LoadUint64(&n.MillisecondToSleep)
 	if sleep > 0 {
 		time.Sleep(time.Duration(sleep) * time.Millisecond)
 	}
 	if n.NoAlloc {
-		return sm.Result{Value: uint64(len(data))}, nil
+		return sm.Result{Value: uint64(len(e.Cmd))}, nil
 	}
-	v := make([]byte, len(data))
-	copy(v, data)
-	return sm.Result{Value: uint64(len(data)), Data: v}, nil
+	v := make([]byte, len(e.Cmd))
+	copy(v, e.Cmd)
+	return sm.Result{Value: uint64(len(e.Cmd)), Data: v}, nil
 }
 
 // SaveSnapshot saves the state of the object to the provided io.Writer object.

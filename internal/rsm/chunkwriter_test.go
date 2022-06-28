@@ -19,8 +19,8 @@ import (
 	"encoding/binary"
 	"testing"
 
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 type testSink struct {
@@ -42,11 +42,11 @@ func (s *testSink) Close() error {
 	return nil
 }
 
-func (s *testSink) ClusterID() uint64 {
+func (s *testSink) ShardID() uint64 {
 	return 2000
 }
 
-func (s *testSink) ToNodeID() uint64 {
+func (s *testSink) ToReplicaID() uint64 {
 	return 300
 }
 

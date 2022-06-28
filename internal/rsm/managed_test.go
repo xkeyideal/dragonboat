@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 func init() {
@@ -100,10 +100,10 @@ func TestLookupWillFailOnClosedStateMachine(t *testing.T) {
 	sm.Loaded()
 	sm.Offloaded()
 	sm.Close()
-	if _, err := sm.Lookup(nil); err != ErrClusterClosed {
-		t.Errorf("failed to return ErrClusterClosed")
+	if _, err := sm.Lookup(nil); err != ErrShardClosed {
+		t.Errorf("failed to return ErrShardClosed")
 	}
-	if _, err := sm.NALookup(nil); err != ErrClusterClosed {
-		t.Errorf("failed to return ErrClusterClosed")
+	if _, err := sm.NALookup(nil); err != ErrShardClosed {
+		t.Errorf("failed to return ErrShardClosed")
 	}
 }

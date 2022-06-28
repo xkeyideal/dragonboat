@@ -17,13 +17,13 @@ package raft
 import (
 	"github.com/cockroachdb/errors"
 
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 var (
-	maxEntriesToApplySize = settings.Soft.MaxEntrySize
+	maxEntriesToApplySize = settings.Soft.MaxApplyEntrySize
 )
 
 // ErrCompacted is the error returned to indicate that the requested entries
@@ -275,6 +275,18 @@ func (l *entryLog) getEntriesToApply(limit uint64) ([]pb.Entry, error) {
 		return ents, nil
 	}
 	return nil, nil
+}
+
+func (l *entryLog) getCommittedEntries(low uint64,
+	high uint64, maxSize uint64) ([]pb.Entry, error) {
+	if low < l.firstIndex() || low > l.committed {
+		return nil, ErrCompacted
+	}
+	high = min(high, l.committed+1)
+	if low == high {
+		return nil, nil
+	}
+	return l.getEntries(low, high, maxSize)
 }
 
 func (l *entryLog) entriesToSave() []pb.Entry {

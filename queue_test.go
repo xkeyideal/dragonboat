@@ -17,8 +17,8 @@ package dragonboat
 import (
 	"testing"
 
-	"github.com/lni/dragonboat/v3/raftio"
-	"github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/raftio"
+	"github.com/lni/dragonboat/v4/raftpb"
 )
 
 func TestEntryQueueCanBeCreated(t *testing.T) {
@@ -218,53 +218,53 @@ func TestEntryQueueAllowAddedEntriesToBeReturned(t *testing.T) {
 	}
 }
 
-func TestClusterCanBeSetAsReady(t *testing.T) {
-	rc := newReadyCluster()
+func TestShardCanBeSetAsReady(t *testing.T) {
+	rc := newReadyShard()
 	if len(rc.ready) != 0 {
 		t.Errorf("ready map not empty")
 	}
-	rc.setClusterReady(1)
-	rc.setClusterReady(2)
-	rc.setClusterReady(2)
+	rc.setShardReady(1)
+	rc.setShardReady(2)
+	rc.setShardReady(2)
 	if len(rc.ready) != 2 {
 		t.Errorf("ready map sz %d, want 2", len(rc.ready))
 	}
 	_, ok := rc.ready[1]
 	if !ok {
-		t.Errorf("cluster 1 not set as ready")
+		t.Errorf("shard 1 not set as ready")
 	}
 	_, ok = rc.ready[2]
 	if !ok {
-		t.Errorf("cluster 2 not set as ready")
+		t.Errorf("shard 2 not set as ready")
 	}
 }
 
-func TestReadyClusterCanBeReturnedAndCleared(t *testing.T) {
-	rc := newReadyCluster()
+func TestReadyShardCanBeReturnedAndCleared(t *testing.T) {
+	rc := newReadyShard()
 	if len(rc.ready) != 0 {
 		t.Errorf("ready map not empty")
 	}
-	rc.setClusterReady(1)
-	rc.setClusterReady(2)
-	rc.setClusterReady(2)
+	rc.setShardReady(1)
+	rc.setShardReady(2)
+	rc.setShardReady(2)
 	if len(rc.ready) != 2 {
 		t.Errorf("ready map sz %d, want 2", len(rc.ready))
 	}
-	r := rc.getReadyClusters()
+	r := rc.getReadyShards()
 	if len(r) != 2 {
 		t.Errorf("ready map sz %d, want 2", len(r))
 	}
 	if len(rc.ready) != 0 {
-		t.Errorf("cluster ready map not cleared")
+		t.Errorf("shard ready map not cleared")
 	}
-	r = rc.getReadyClusters()
+	r = rc.getReadyShards()
 	if len(r) != 0 {
-		t.Errorf("cluster ready map not cleared")
+		t.Errorf("shard ready map not cleared")
 	}
-	rc.setClusterReady(4)
-	r = rc.getReadyClusters()
+	rc.setShardReady(4)
+	r = rc.getReadyShards()
 	if len(r) != 1 {
-		t.Errorf("cluster ready not set")
+		t.Errorf("shard ready not set")
 	}
 }
 
@@ -303,17 +303,17 @@ func TestGetFromLeaderInfoQueue(t *testing.T) {
 	if ok {
 		t.Errorf("unexpectedly returned leader info")
 	}
-	v1 := raftio.LeaderInfo{ClusterID: 101}
-	v2 := raftio.LeaderInfo{ClusterID: 2002}
+	v1 := raftio.LeaderInfo{ShardID: 101}
+	v2 := raftio.LeaderInfo{ShardID: 2002}
 	q.addLeaderInfo(v1)
 	q.addLeaderInfo(v2)
 	rv1, ok1 := q.getLeaderInfo()
 	rv2, ok2 := q.getLeaderInfo()
 	_, ok3 := q.getLeaderInfo()
-	if !ok1 || rv1.ClusterID != v1.ClusterID {
+	if !ok1 || rv1.ShardID != v1.ShardID {
 		t.Errorf("unexpected result")
 	}
-	if !ok2 || rv2.ClusterID != v2.ClusterID {
+	if !ok2 || rv2.ShardID != v2.ShardID {
 		t.Errorf("unexpected result")
 	}
 	if ok3 {

@@ -21,11 +21,13 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lni/dragonboat/v3/client"
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/rsm"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/lni/dragonboat/v4/client"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/rsm"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 	"github.com/lni/goutils/random"
 )
 
@@ -40,18 +42,14 @@ func TestIsTempError(t *testing.T) {
 		{ErrTimeoutTooSmall, false},
 		{ErrPayloadTooBig, false},
 		{ErrSystemBusy, true},
-		{ErrClusterClosed, true},
-		{ErrClusterNotInitialized, true},
+		{ErrShardClosed, true},
+		{ErrShardNotInitialized, true},
 		{ErrTimeout, true},
 		{ErrCanceled, false},
 		{ErrRejected, false},
-		{ErrClusterNotReady, true},
+		{ErrShardNotReady, true},
 		{ErrInvalidTarget, false},
-		{ErrInvalidNodeHostID, false},
-		{ErrBadKey, false},
-		{ErrPendingLeaderTransferExist, true},
-		{ErrPendingConfigChangeExist, true},
-		{ErrPendingSnapshotRequestExist, true},
+		{ErrInvalidRange, false},
 	}
 	for idx, tt := range tests {
 		if tmp := IsTempError(tt.err); tmp != tt.temp {
@@ -339,12 +337,12 @@ func TestPendingSnapshotCanBeCreatedAndClosed(t *testing.T) {
 func TestPendingSnapshotCanBeRequested(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 10)
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 10)
 	if err != nil {
 		t.Errorf("failed to request snapshot")
 	}
 	if ss == nil {
-		t.Errorf("nil ss returned")
+		t.Fatalf("nil ss returned")
 	}
 	if ps.pending == nil {
 		t.Errorf("pending not set")
@@ -362,10 +360,10 @@ func TestPendingSnapshotCanBeRequested(t *testing.T) {
 func TestPendingSnapshotCanReturnBusy(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	if _, err := ps.request(rsm.UserRequested, "", false, 0, 10); err != nil {
+	if _, err := ps.request(rsm.UserRequested, "", false, 0, 0, 10); err != nil {
 		t.Errorf("failed to request snapshot")
 	}
-	if _, err := ps.request(rsm.UserRequested, "", false, 0, 10); err != ErrSystemBusy {
+	if _, err := ps.request(rsm.UserRequested, "", false, 0, 0, 10); err != ErrSystemBusy {
 		t.Errorf("failed to return ErrSystemBusy")
 	}
 }
@@ -373,7 +371,7 @@ func TestPendingSnapshotCanReturnBusy(t *testing.T) {
 func TestTooSmallSnapshotTimeoutIsRejected(t *testing.T) {
 	snapshotC := make(chan<- rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0)
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 0)
 	if err != ErrTimeoutTooSmall {
 		t.Errorf("request not rejected")
 	}
@@ -385,14 +383,14 @@ func TestTooSmallSnapshotTimeoutIsRejected(t *testing.T) {
 func TestMultiplePendingSnapshotIsNotAllowed(t *testing.T) {
 	snapshotC := make(chan<- rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 100)
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 100)
 	if err != nil {
 		t.Errorf("failed to request snapshot")
 	}
 	if ss == nil {
-		t.Errorf("nil ss returned")
+		t.Fatalf("nil ss returned")
 	}
-	ss, err = ps.request(rsm.UserRequested, "", false, 0, 100)
+	ss, err = ps.request(rsm.UserRequested, "", false, 0, 0, 100)
 	if err != ErrSystemBusy {
 		t.Errorf("request not rejected")
 	}
@@ -404,9 +402,9 @@ func TestMultiplePendingSnapshotIsNotAllowed(t *testing.T) {
 func TestPendingSnapshotCanBeGCed(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 20)
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 20)
 	if err != nil {
-		t.Errorf("failed to request snapshot")
+		t.Fatalf("failed to request snapshot")
 	}
 	if ss == nil {
 		t.Errorf("nil ss returned")
@@ -439,12 +437,12 @@ func TestPendingSnapshotCanBeGCed(t *testing.T) {
 func TestPendingSnapshotCanBeApplied(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 100)
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 100)
 	if err != nil {
 		t.Errorf("failed to request snapshot")
 	}
 	if ss == nil {
-		t.Errorf("nil ss returned")
+		t.Fatalf("nil ss returned")
 	}
 	ps.apply(ss.key, false, false, 123)
 	select {
@@ -463,12 +461,12 @@ func TestPendingSnapshotCanBeApplied(t *testing.T) {
 func TestPendingSnapshotCanBeIgnored(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 100)
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 100)
 	if err != nil {
 		t.Errorf("failed to request snapshot")
 	}
 	if ss == nil {
-		t.Errorf("nil ss returned")
+		t.Fatalf("nil ss returned")
 	}
 	ps.apply(ss.key, true, false, 123)
 	select {
@@ -487,7 +485,7 @@ func TestPendingSnapshotCanBeIgnored(t *testing.T) {
 func TestPendingSnapshotIsIdentifiedByTheKey(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 100)
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 100)
 	if err != nil {
 		t.Errorf("failed to request snapshot")
 	}
@@ -495,7 +493,7 @@ func TestPendingSnapshotIsIdentifiedByTheKey(t *testing.T) {
 		t.Errorf("nil ss returned")
 	}
 	if ps.pending == nil {
-		t.Errorf("pending not set")
+		t.Fatalf("pending not set")
 	}
 	ps.apply(ss.key+1, false, false, 123)
 	if ps.pending == nil {
@@ -512,8 +510,8 @@ func TestSnapshotCanNotBeRequestedAfterClose(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
 	ps.close()
-	ss, err := ps.request(rsm.UserRequested, "", false, 0, 100)
-	if err != ErrClusterClosed {
+	ss, err := ps.request(rsm.UserRequested, "", false, 0, 0, 100)
+	if err != ErrShardClosed {
 		t.Errorf("not report as closed")
 	}
 	if ss != nil {
@@ -524,7 +522,7 @@ func TestSnapshotCanNotBeRequestedAfterClose(t *testing.T) {
 func TestCompactionOverheadDetailsIsRecorded(t *testing.T) {
 	snapshotC := make(chan rsm.SSRequest, 1)
 	ps := newPendingSnapshot(snapshotC)
-	_, err := ps.request(rsm.UserRequested, "", true, 123, 100)
+	_, err := ps.request(rsm.UserRequested, "", true, 123, 0, 100)
 	if err != nil {
 		t.Errorf("failed to request snapshot")
 	}
@@ -613,8 +611,8 @@ func TestPendingConfigChangeCanBeCreatedAndClosed(t *testing.T) {
 func TestCanNotMakeRequestOnClosedPendingConfigChange(t *testing.T) {
 	pcc, _ := getPendingConfigChange(false)
 	pcc.close()
-	if _, err := pcc.request(pb.ConfigChange{}, 100); err != ErrClusterClosed {
-		t.Errorf("failed to return ErrClusterClosed, %v", err)
+	if _, err := pcc.request(pb.ConfigChange{}, 100); err != ErrShardClosed {
+		t.Errorf("failed to return ErrShardClosed, %v", err)
 	}
 }
 
@@ -825,7 +823,7 @@ func getPendingProposal(notifyCommit bool) (pendingProposal, *entryQueue) {
 		}
 		return obj
 	}
-	cfg := config.Config{ClusterID: 100, NodeID: 120}
+	cfg := config.Config{ShardID: 100, ReplicaID: 120}
 	return newPendingProposal(cfg, notifyCommit, p, c), c
 }
 
@@ -913,7 +911,7 @@ func TestProposeOnClosedPendingProposalReturnError(t *testing.T) {
 	pp, _ := getPendingProposal(false)
 	pp.close()
 	_, err := pp.propose(getBlankTestSession(), []byte("test data"), 100)
-	if err != ErrClusterClosed {
+	if err != ErrShardClosed {
 		t.Errorf("unexpected err %v", err)
 	}
 }
@@ -1193,8 +1191,8 @@ func TestPendingReadIndexCanBeCreatedAndClosed(t *testing.T) {
 func TestCanNotMakeRequestOnClosedPendingReadIndex(t *testing.T) {
 	pp, _ := getPendingReadIndex()
 	pp.close()
-	if _, err := pp.read(100); err != ErrClusterClosed {
-		t.Errorf("failed to return ErrClusterClosed %v", err)
+	if _, err := pp.read(100); err != ErrShardClosed {
+		t.Errorf("failed to return ErrShardClosed %v", err)
 	}
 }
 
@@ -1377,7 +1375,7 @@ func TestProposalAllocationCount(t *testing.T) {
 	}
 	total := uint32(0)
 	q := newEntryQueue(2048, 0)
-	cfg := config.Config{ClusterID: 1, NodeID: 1}
+	cfg := config.Config{ShardID: 1, ReplicaID: 1}
 	pp := newPendingProposal(cfg, false, p, q)
 	session := client.NewNoOPSession(1, random.LockGuardedRand)
 	ac := testing.AllocsPerRun(10000, func() {
@@ -1425,5 +1423,96 @@ func TestReadIndexAllocationCount(t *testing.T) {
 	})
 	if ac != 0 {
 		t.Fatalf("ac %f, want 0", ac)
+	}
+}
+
+func TestPendingRaftLogQueryCanBeCreated(t *testing.T) {
+	p := newPendingRaftLogQuery()
+	assert.Nil(t, p.mu.pending)
+}
+
+func TestPendingRaftLogQueryCanBeClosed(t *testing.T) {
+	p := newPendingRaftLogQuery()
+	rs, err := p.add(100, 200, 300)
+	assert.NoError(t, err)
+	assert.NotNil(t, p.mu.pending)
+	p.close()
+	assert.Nil(t, p.mu.pending)
+	select {
+	case v := <-rs.CompletedC:
+		assert.True(t, v.Terminated())
+	default:
+		t.Fatalf("not terminated")
+	}
+}
+
+func TestPendingRaftLogQueryCanAddRequest(t *testing.T) {
+	p := newPendingRaftLogQuery()
+	rs, err := p.add(100, 200, 300)
+	assert.NotNil(t, rs)
+	assert.NoError(t, err)
+	rs, err = p.add(200, 200, 300)
+	assert.Equal(t, ErrSystemBusy, err)
+	assert.Nil(t, rs)
+	assert.NotNil(t, p.mu.pending)
+	assert.Equal(t, LogRange{FirstIndex: 100, LastIndex: 200}, p.mu.pending.logRange)
+	assert.Equal(t, uint64(300), p.mu.pending.maxSize)
+	assert.NotNil(t, p.mu.pending.CompletedC)
+}
+
+func TestPendingRaftLogQueryGet(t *testing.T) {
+	p := newPendingRaftLogQuery()
+	assert.Nil(t, p.get())
+	rs, err := p.add(100, 200, 300)
+	assert.NoError(t, err)
+	assert.NotNil(t, p.mu.pending)
+	result := p.get()
+	assert.Equal(t, rs, result)
+	assert.Equal(t, LogRange{FirstIndex: 100, LastIndex: 200}, result.logRange)
+	assert.Equal(t, uint64(300), result.maxSize)
+	assert.NotNil(t, result.CompletedC)
+}
+
+func TestPendingRaftLogQueryGetWhenReturnedIsCalledWithoutPendingRequest(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("failed to panic")
+		}
+	}()
+	p := newPendingRaftLogQuery()
+	p.returned(false, LogRange{}, nil)
+}
+
+func TestPendingRaftLogQueryCanReturnOutOfRangeError(t *testing.T) {
+	p := newPendingRaftLogQuery()
+	rs, err := p.add(100, 200, 300)
+	assert.NoError(t, err)
+	lr := LogRange{FirstIndex: 150, LastIndex: 200}
+	p.returned(true, lr, nil)
+	select {
+	case v := <-rs.CompletedC:
+		assert.True(t, v.RequestOutOfRange())
+		_, rrl := v.RaftLogs()
+		assert.Equal(t, lr, rrl)
+	default:
+		t.Fatalf("no result available")
+	}
+}
+
+func TestPendingRaftLogQueryCanReturnResults(t *testing.T) {
+	p := newPendingRaftLogQuery()
+	rs, err := p.add(100, 200, 300)
+	assert.NoError(t, err)
+	entries := []pb.Entry{{Index: 1}, {Index: 2}}
+	lr := LogRange{FirstIndex: 100, LastIndex: 180}
+	p.returned(false, lr, entries)
+	select {
+	case v := <-rs.CompletedC:
+		assert.True(t, v.Completed())
+		rentries, rrl := v.RaftLogs()
+		assert.Equal(t, lr, rrl)
+		assert.Equal(t, entries, rentries)
+	default:
+		t.Fatalf("no result available")
 	}
 }

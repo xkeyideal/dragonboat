@@ -21,8 +21,8 @@ import (
 
 	"github.com/VictoriaMetrics/metrics"
 
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/raftio"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/raftio"
 )
 
 // WriteHealthMetrics writes all health metrics in Prometheus format to the
@@ -36,33 +36,31 @@ type raftEventListener struct {
 	readIndexDropped    *metrics.Counter
 	proposalDropped     *metrics.Counter
 	replicationRejected *metrics.Counter
-	leaderID            *uint64
 	snapshotRejected    *metrics.Counter
 	queue               *leaderInfoQueue
 	hasLeader           *metrics.Gauge
 	term                *metrics.Gauge
 	campaignLaunched    *metrics.Counter
 	campaignSkipped     *metrics.Counter
+	leaderID            uint64
 	termValue           uint64
-	nodeID              uint64
-	clusterID           uint64
+	replicaID           uint64
+	shardID             uint64
 	metrics             bool
 }
 
 var _ server.IRaftEventListener = (*raftEventListener)(nil)
 
-func newRaftEventListener(clusterID uint64, nodeID uint64,
-	leaderID *uint64, useMetrics bool,
-	queue *leaderInfoQueue) *raftEventListener {
+func newRaftEventListener(shardID uint64, replicaID uint64,
+	useMetrics bool, queue *leaderInfoQueue) *raftEventListener {
 	el := &raftEventListener{
-		clusterID: clusterID,
-		nodeID:    nodeID,
-		leaderID:  leaderID,
+		shardID:   shardID,
+		replicaID: replicaID,
 		metrics:   useMetrics,
 		queue:     queue,
 	}
 	if useMetrics {
-		label := fmt.Sprintf(`{clusterid="%d",nodeid="%d"}`, clusterID, nodeID)
+		label := fmt.Sprintf(`{shardid="%d",replicaid="%d"}`, shardID, replicaID)
 		name := fmt.Sprintf(`dragonboat_raftnode_campaign_launched_total%s`, label)
 		el.campaignLaunched = metrics.GetOrCreateCounter(name)
 		name = fmt.Sprintf(`dragonboat_raftnode_campaign_skipped_total%s`, label)
@@ -77,7 +75,7 @@ func newRaftEventListener(clusterID uint64, nodeID uint64,
 		el.readIndexDropped = metrics.GetOrCreateCounter(name)
 		name = fmt.Sprintf(`dragonboat_raftnode_has_leader%s`, label)
 		el.hasLeader = metrics.GetOrCreateGauge(name, func() float64 {
-			if atomic.LoadUint64(leaderID) == raftio.NoLeader {
+			if atomic.LoadUint64(&el.leaderID) == raftio.NoLeader {
 				return 0.0
 			}
 			return 1.0
@@ -94,12 +92,12 @@ func (e *raftEventListener) close() {
 }
 
 func (e *raftEventListener) LeaderUpdated(info server.LeaderInfo) {
-	atomic.StoreUint64(e.leaderID, info.LeaderID)
+	atomic.StoreUint64(&e.leaderID, info.LeaderID)
 	atomic.StoreUint64(&e.termValue, info.Term)
 	if e.queue != nil {
 		ui := raftio.LeaderInfo{
-			ClusterID: info.ClusterID,
-			NodeID:    info.NodeID,
+			ShardID:   info.ShardID,
+			ReplicaID: info.ReplicaID,
 			Term:      info.Term,
 			LeaderID:  info.LeaderID,
 		}
@@ -211,8 +209,8 @@ func (l *sysEventListener) handle(e server.SystemEvent) {
 
 func getSnapshotInfo(e server.SystemEvent) raftio.SnapshotInfo {
 	return raftio.SnapshotInfo{
-		ClusterID: e.ClusterID,
-		NodeID:    e.NodeID,
+		ShardID:   e.ShardID,
+		ReplicaID: e.ReplicaID,
 		From:      e.From,
 		Index:     e.Index,
 	}
@@ -220,15 +218,15 @@ func getSnapshotInfo(e server.SystemEvent) raftio.SnapshotInfo {
 
 func getNodeInfo(e server.SystemEvent) raftio.NodeInfo {
 	return raftio.NodeInfo{
-		ClusterID: e.ClusterID,
-		NodeID:    e.NodeID,
+		ShardID:   e.ShardID,
+		ReplicaID: e.ReplicaID,
 	}
 }
 
 func getEntryInfo(e server.SystemEvent) raftio.EntryInfo {
 	return raftio.EntryInfo{
-		ClusterID: e.ClusterID,
-		NodeID:    e.NodeID,
+		ShardID:   e.ShardID,
+		ReplicaID: e.ReplicaID,
 		Index:     e.Index,
 	}
 }

@@ -20,20 +20,20 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/lni/goutils/logutil"
-	"github.com/lni/goutils/syncutil"
 
-	"github.com/lni/dragonboat/v3/client"
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	"github.com/lni/dragonboat/v3/internal/logdb"
-	"github.com/lni/dragonboat/v3/internal/raft"
-	"github.com/lni/dragonboat/v3/internal/rsm"
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/internal/transport"
-	"github.com/lni/dragonboat/v3/raftio"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/client"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	"github.com/lni/dragonboat/v4/internal/logdb"
+	"github.com/lni/dragonboat/v4/internal/raft"
+	"github.com/lni/dragonboat/v4/internal/registry"
+	"github.com/lni/dragonboat/v4/internal/rsm"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/internal/transport"
+	"github.com/lni/dragonboat/v4/raftio"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 var (
@@ -45,12 +45,12 @@ var (
 
 type pipeline interface {
 	setCloseReady(*node)
-	setStepReady(clusterID uint64)
-	setCommitReady(clusterID uint64)
-	setApplyReady(clusterID uint64)
-	setStreamReady(clusterID uint64)
-	setSaveReady(clusterID uint64)
-	setRecoverReady(clusterID uint64)
+	setStepReady(shardID uint64)
+	setCommitReady(shardID uint64)
+	setApplyReady(shardID uint64)
+	setStreamReady(shardID uint64)
+	setSaveReady(shardID uint64)
+	setRecoverReady(shardID uint64)
 }
 
 type logDBMetrics struct {
@@ -69,9 +69,15 @@ func (l *logDBMetrics) isBusy() bool {
 	return atomic.LoadInt32(&l.busy) != 0
 }
 
+type leaderInfo struct {
+	leaderID uint64
+	term     uint64
+}
+
 type node struct {
-	clusterInfo           atomic.Value
-	nodeRegistry          transport.INodeRegistry
+	shardInfo             atomic.Value
+	leaderInfo            atomic.Value
+	nodeRegistry          registry.INodeRegistry
 	logdb                 raftio.ILogDB
 	pipeline              pipeline
 	getStreamSink         func(uint64, uint64) *transport.Sink
@@ -91,12 +97,13 @@ type node struct {
 	sm                    *rsm.StateMachine
 	incomingReadIndexes   *readIndexQueue
 	incomingProposals     *entryQueue
-	snapshotLock          syncutil.Lock
+	snapshotLock          sync.Mutex
 	pendingProposals      pendingProposal
 	pendingReadIndexes    pendingReadIndex
 	pendingConfigChange   pendingConfigChange
 	pendingSnapshot       pendingSnapshot
 	pendingLeaderTransfer pendingLeaderTransfer
+	pendingRaftLogQuery   pendingRaftLogQuery
 	initializedC          chan struct{}
 	p                     raft.Peer
 	logReader             *logdb.LogReader
@@ -111,9 +118,8 @@ type node struct {
 	pushedIndex           uint64
 	confirmedIndex        uint64
 	tickMillisecond       uint64
-	clusterID             uint64
-	nodeID                uint64
-	leaderID              uint64
+	shardID               uint64
+	replicaID             uint64
 	instanceID            uint64
 	initializedFlag       uint64
 	closeOnce             sync.Once
@@ -140,7 +146,7 @@ func newNode(peers map[uint64]string,
 	getStreamSink func(uint64, uint64) *transport.Sink,
 	handleSnapshotStatus func(uint64, uint64, bool),
 	sendMessage func(pb.Message),
-	nodeRegistry transport.INodeRegistry,
+	nodeRegistry registry.INodeRegistry,
 	pool *sync.Pool,
 	ldb raftio.ILogDB,
 	metrics *logDBMetrics,
@@ -154,8 +160,8 @@ func newNode(peers map[uint64]string,
 	mq := server.NewMessageQueue(receiveQueueLen,
 		false, lazyFreeCycle, nhConfig.MaxReceiveQueueSize)
 	rn := &node{
-		clusterID:             config.ClusterID,
-		nodeID:                config.NodeID,
+		shardID:               config.ShardID,
+		replicaID:             config.ReplicaID,
 		raftAddress:           nhConfig.RaftAddress,
 		instanceID:            atomic.AddUint64(&instanceID, 1),
 		tickMillisecond:       nhConfig.RTTMillisecond,
@@ -173,13 +179,13 @@ func newNode(peers map[uint64]string,
 		pendingConfigChange:   newPendingConfigChange(configChangeC, notifyCommit),
 		pendingSnapshot:       newPendingSnapshot(snapshotC),
 		pendingLeaderTransfer: newPendingLeaderTransfer(),
+		pendingRaftLogQuery:   newPendingRaftLogQuery(),
 		nodeRegistry:          nodeRegistry,
 		snapshotter:           snapshotter,
 		logReader:             logReader,
 		sendRaftMessage:       sendMessage,
 		mq:                    mq,
 		logdb:                 ldb,
-		snapshotLock:          syncutil.NewLock(),
 		syncTask:              newTask(syncTaskInterval),
 		sysEvents:             sysEvents,
 		notifyCommit:          notifyCommit,
@@ -190,19 +196,19 @@ func newNode(peers map[uint64]string,
 		qs: &quiesceState{
 			electionTick: config.ElectionRTT * 2,
 			enabled:      config.Quiesce,
-			clusterID:    config.ClusterID,
-			nodeID:       config.NodeID,
+			shardID:      config.ShardID,
+			replicaID:    config.ReplicaID,
 		},
 	}
-	ds := createSM(config.ClusterID, config.NodeID, stopC)
+	ds := createSM(config.ShardID, config.ReplicaID, stopC)
 	sm := rsm.NewStateMachine(ds, snapshotter, config, rn, snapshotter.fs)
 	if notifyCommit {
 		rn.toCommitQ = rsm.NewTaskQueue()
 	}
 	rn.toApplyQ = sm.TaskQ()
 	rn.sm = sm
-	rn.raftEvents = newRaftEventListener(config.ClusterID,
-		config.NodeID, &rn.leaderID, nhConfig.EnableMetrics, liQueue)
+	rn.raftEvents = newRaftEventListener(config.ShardID,
+		config.ReplicaID, nhConfig.EnableMetrics, liQueue)
 	new, err := rn.startRaft(config, peers, initialMember)
 	if err != nil {
 		return nil, err
@@ -211,12 +217,12 @@ func newNode(peers map[uint64]string,
 	return rn, nil
 }
 
-func (n *node) NodeID() uint64 {
-	return n.nodeID
+func (n *node) ReplicaID() uint64 {
+	return n.replicaID
 }
 
-func (n *node) ClusterID() uint64 {
-	return n.clusterID
+func (n *node) ShardID() uint64 {
+	return n.shardID
 }
 
 func (n *node) ShouldStop() <-chan struct{} {
@@ -224,15 +230,15 @@ func (n *node) ShouldStop() <-chan struct{} {
 }
 
 func (n *node) StepReady() {
-	n.pipeline.setStepReady(n.clusterID)
+	n.pipeline.setStepReady(n.shardID)
 }
 
 func (n *node) applyReady() {
-	n.pipeline.setApplyReady(n.clusterID)
+	n.pipeline.setApplyReady(n.shardID)
 }
 
 func (n *node) commitReady() {
-	n.pipeline.setCommitReady(n.clusterID)
+	n.pipeline.setCommitReady(n.shardID)
 }
 
 func (n *node) ApplyUpdate(e pb.Entry,
@@ -269,14 +275,14 @@ func (n *node) applyConfigChange(cc pb.ConfigChange) error {
 	}
 	switch cc.Type {
 	case pb.AddNode, pb.AddNonVoting, pb.AddWitness:
-		n.nodeRegistry.Add(n.clusterID, cc.NodeID, cc.Address)
+		n.nodeRegistry.Add(n.shardID, cc.ReplicaID, cc.Address)
 	case pb.RemoveNode:
-		if cc.NodeID == n.nodeID {
+		if cc.ReplicaID == n.replicaID {
 			plog.Infof("%s applied ConfChange Remove for itself", n.id())
-			n.nodeRegistry.RemoveCluster(n.clusterID)
+			n.nodeRegistry.RemoveShard(n.shardID)
 			n.requestRemoval()
 		} else {
-			n.nodeRegistry.Remove(n.clusterID, cc.NodeID)
+			n.nodeRegistry.Remove(n.shardID, cc.ReplicaID)
 		}
 	default:
 		plog.Panicf("unknown config change type, %s", cc.Type)
@@ -299,6 +305,33 @@ func (n *node) configChangeProcessed(key uint64, rejected bool) error {
 	return nil
 }
 
+func (n *node) processLeaderUpdate(u pb.LeaderUpdate) {
+	if u.Term == 0 {
+		return
+	}
+	leaderInfo := &leaderInfo{
+		leaderID: u.LeaderID,
+		term:     u.Term,
+	}
+	n.leaderInfo.Store(leaderInfo)
+}
+
+func (n *node) processLogQuery(r pb.LogQueryResult) {
+	if r.IsEmpty() {
+		return
+	}
+	outOfRange := false
+	if r.Error != nil {
+		if errors.Is(r.Error, raft.ErrCompacted) {
+			outOfRange = true
+		} else {
+			panic(r.Error)
+		}
+	}
+	n.pendingRaftLogQuery.returned(outOfRange,
+		LogRange{FirstIndex: r.FirstIndex, LastIndex: r.LastIndex}, r.Entries)
+}
+
 func (n *node) RestoreRemotes(snapshot pb.Snapshot) error {
 	if snapshot.Membership.ConfigChangeId == 0 {
 		plog.Panicf("invalid ConfChangeId")
@@ -306,17 +339,17 @@ func (n *node) RestoreRemotes(snapshot pb.Snapshot) error {
 	n.raftMu.Lock()
 	defer n.raftMu.Unlock()
 	for nid, addr := range snapshot.Membership.Addresses {
-		n.nodeRegistry.Add(n.clusterID, nid, addr)
+		n.nodeRegistry.Add(n.shardID, nid, addr)
 	}
 	for nid, addr := range snapshot.Membership.NonVotings {
-		n.nodeRegistry.Add(n.clusterID, nid, addr)
+		n.nodeRegistry.Add(n.shardID, nid, addr)
 	}
 	for nid, addr := range snapshot.Membership.Witnesses {
-		n.nodeRegistry.Add(n.clusterID, nid, addr)
+		n.nodeRegistry.Add(n.shardID, nid, addr)
 	}
 	for nid := range snapshot.Membership.Removed {
-		if nid == n.nodeID {
-			n.nodeRegistry.RemoveCluster(n.clusterID)
+		if nid == n.replicaID {
+			n.nodeRegistry.RemoveShard(n.shardID)
 			n.requestRemoval()
 		}
 	}
@@ -330,13 +363,13 @@ func (n *node) RestoreRemotes(snapshot pb.Snapshot) error {
 
 func (n *node) startRaft(cfg config.Config,
 	peers map[uint64]string, initial bool) (bool, error) {
-	newNode, err := n.replayLog(cfg.ClusterID, cfg.NodeID)
+	newNode, err := n.replayLog(cfg.ShardID, cfg.ReplicaID)
 	if err != nil {
 		return false, err
 	}
 	pas := make([]raft.PeerAddress, 0)
 	for k, v := range peers {
-		pas = append(pas, raft.PeerAddress{NodeID: k, Address: v})
+		pas = append(pas, raft.PeerAddress{ReplicaID: k, Address: v})
 	}
 	n.p = raft.Launch(cfg, n.logReader, n.raftEvents, pas, initial, newNode)
 	return newNode, nil
@@ -350,6 +383,7 @@ func (n *node) close() {
 	n.pendingProposals.close()
 	n.pendingConfigChange.close()
 	n.pendingSnapshot.close()
+	n.pendingRaftLogQuery.close()
 }
 
 func (n *node) stopped() bool {
@@ -387,12 +421,12 @@ func (n *node) OnDiskStateMachine() bool {
 func (n *node) proposeSession(session *client.Session,
 	timeout uint64) (*RequestState, error) {
 	if !n.initialized() {
-		return nil, ErrClusterNotReady
+		return nil, ErrShardNotReady
 	}
 	if n.isWitness() {
 		return nil, ErrInvalidOperation
 	}
-	if !session.ValidForSessionOp(n.clusterID) {
+	if !session.ValidForSessionOp(n.shardID) {
 		return nil, ErrInvalidSession
 	}
 	return n.pendingProposals.propose(session, nil, timeout)
@@ -408,12 +442,12 @@ func (n *node) payloadTooBig(sz int) bool {
 func (n *node) propose(session *client.Session,
 	cmd []byte, timeout uint64) (*RequestState, error) {
 	if !n.initialized() {
-		return nil, ErrClusterNotReady
+		return nil, ErrShardNotReady
 	}
 	if n.isWitness() {
 		return nil, ErrInvalidOperation
 	}
-	if !session.ValidForProposal(n.clusterID) {
+	if !session.ValidForProposal(n.shardID) {
 		return nil, ErrInvalidSession
 	}
 	if n.payloadTooBig(len(cmd)) {
@@ -424,7 +458,7 @@ func (n *node) propose(session *client.Session,
 
 func (n *node) read(timeout uint64) (*RequestState, error) {
 	if !n.initialized() {
-		return nil, ErrClusterNotReady
+		return nil, ErrShardNotReady
 	}
 	if n.isWitness() {
 		return nil, ErrInvalidOperation
@@ -436,20 +470,20 @@ func (n *node) read(timeout uint64) (*RequestState, error) {
 	return rs, err
 }
 
-func (n *node) requestLeaderTransfer(nodeID uint64) error {
+func (n *node) requestLeaderTransfer(replicaID uint64) error {
 	if !n.initialized() {
-		return ErrClusterNotReady
+		return ErrShardNotReady
 	}
 	if n.isWitness() {
 		return ErrInvalidOperation
 	}
-	return n.pendingLeaderTransfer.request(nodeID)
+	return n.pendingLeaderTransfer.request(replicaID)
 }
 
 func (n *node) requestSnapshot(opt SnapshotOption,
 	timeout uint64) (*RequestState, error) {
 	if !n.initialized() {
-		return nil, ErrClusterNotReady
+		return nil, ErrShardNotReady
 	}
 	if n.isWitness() {
 		return nil, ErrInvalidOperation
@@ -475,7 +509,19 @@ func (n *node) requestSnapshot(opt SnapshotOption,
 		opt.ExportPath,
 		opt.OverrideCompactionOverhead,
 		opt.CompactionOverhead,
+		opt.CompactionIndex,
 		timeout)
+}
+
+func (n *node) queryRaftLog(firstIndex uint64,
+	lastIndex uint64, maxSize uint64) (*RequestState, error) {
+	if !n.initialized() {
+		return nil, ErrShardNotReady
+	}
+	if n.isWitness() {
+		return nil, ErrInvalidOperation
+	}
+	return n.pendingRaftLogQuery.add(firstIndex, lastIndex, maxSize)
 }
 
 func (n *node) reportIgnoredSnapshotRequest(key uint64) {
@@ -483,10 +529,10 @@ func (n *node) reportIgnoredSnapshotRequest(key uint64) {
 }
 
 func (n *node) requestConfigChange(cct pb.ConfigChangeType,
-	nodeID uint64, target string, orderID uint64,
+	replicaID uint64, target string, orderID uint64,
 	timeout uint64) (*RequestState, error) {
 	if !n.initialized() {
-		return nil, ErrClusterNotReady
+		return nil, ErrShardNotReady
 	}
 	if n.isWitness() {
 		return nil, ErrInvalidOperation
@@ -496,40 +542,54 @@ func (n *node) requestConfigChange(cct pb.ConfigChangeType,
 	}
 	cc := pb.ConfigChange{
 		Type:           cct,
-		NodeID:         nodeID,
+		ReplicaID:      replicaID,
 		ConfigChangeId: orderID,
 		Address:        target,
 	}
 	return n.pendingConfigChange.request(cc, timeout)
 }
 
-func (n *node) requestDeleteNodeWithOrderID(nodeID uint64,
+func (n *node) requestDeleteNodeWithOrderID(replicaID uint64,
 	order uint64, timeout uint64) (*RequestState, error) {
-	return n.requestConfigChange(pb.RemoveNode, nodeID, "", order, timeout)
+	return n.requestConfigChange(pb.RemoveNode, replicaID, "", order, timeout)
 }
 
-func (n *node) requestAddNodeWithOrderID(nodeID uint64,
+func (n *node) requestAddNodeWithOrderID(replicaID uint64,
 	target string, order uint64, timeout uint64) (*RequestState, error) {
-	return n.requestConfigChange(pb.AddNode, nodeID, target, order, timeout)
+	return n.requestConfigChange(pb.AddNode, replicaID, target, order, timeout)
 }
 
-func (n *node) requestAddNonVotingWithOrderID(nodeID uint64,
+func (n *node) requestAddNonVotingWithOrderID(replicaID uint64,
 	target string, order uint64, timeout uint64) (*RequestState, error) {
-	return n.requestConfigChange(pb.AddNonVoting, nodeID, target, order, timeout)
+	return n.requestConfigChange(pb.AddNonVoting, replicaID, target, order, timeout)
 }
 
-func (n *node) requestAddWitnessWithOrderID(nodeID uint64,
+func (n *node) requestAddWitnessWithOrderID(replicaID uint64,
 	target string, order uint64, timeout uint64) (*RequestState, error) {
-	return n.requestConfigChange(pb.AddWitness, nodeID, target, order, timeout)
+	return n.requestConfigChange(pb.AddWitness, replicaID, target, order, timeout)
 }
 
-func (n *node) getLeaderID() (uint64, bool) {
-	v := atomic.LoadUint64(&n.leaderID)
-	return v, v != raft.NoLeader
+func (n *node) getLeaderID() (uint64, uint64, bool) {
+	lv := n.leaderInfo.Load()
+	if lv == nil {
+		return 0, 0, false
+	}
+	leaderInfo := lv.(*leaderInfo)
+	return leaderInfo.leaderID, leaderInfo.term, leaderInfo.leaderID != raft.NoLeader
 }
 
 func (n *node) destroy() error {
 	return n.sm.Close()
+}
+
+func (n *node) destroyed() bool {
+	select {
+	case <-n.sm.DestroyedC():
+		return true
+	default:
+	}
+
+	return false
 }
 
 func (n *node) offloaded() {
@@ -537,8 +597,8 @@ func (n *node) offloaded() {
 		n.pipeline.setCloseReady(n)
 		n.sysEvents.Publish(server.SystemEvent{
 			Type:      server.NodeUnloaded,
-			ClusterID: n.clusterID,
-			NodeID:    n.nodeID,
+			ShardID:   n.shardID,
+			ReplicaID: n.replicaID,
 		})
 	}
 }
@@ -569,10 +629,10 @@ func (n *node) pushEntries(ents []pb.Entry) {
 	n.pushedIndex = ents[len(ents)-1].Index
 }
 
-func (n *node) pushStreamSnapshotRequest(clusterID uint64, nodeID uint64) {
+func (n *node) pushStreamSnapshotRequest(shardID uint64, replicaID uint64) {
 	n.pushTask(rsm.Task{
-		ClusterID: clusterID,
-		NodeID:    nodeID,
+		ShardID:   shardID,
+		ReplicaID: replicaID,
 		Stream:    true,
 	}, true)
 }
@@ -602,7 +662,7 @@ func (n *node) pushSnapshot(ss pb.Snapshot, applied uint64) {
 	n.pushedIndex = ss.Index
 }
 
-func (n *node) replayLog(clusterID uint64, nodeID uint64) (bool, error) {
+func (n *node) replayLog(shardID uint64, replicaID uint64) (bool, error) {
 	plog.Infof("%s replaying raft logs", n.id())
 	ss, err := n.snapshotter.GetSnapshotFromLogDB()
 	if err != nil && !n.snapshotter.IsNoSnapshotError(err) {
@@ -613,7 +673,7 @@ func (n *node) replayLog(clusterID uint64, nodeID uint64) (bool, error) {
 			return false, errors.Wrapf(err, "%s failed to apply snapshot", n.id())
 		}
 	}
-	rs, err := n.logdb.ReadRaftState(clusterID, nodeID, ss.Index)
+	rs, err := n.logdb.ReadRaftState(shardID, replicaID, ss.Index)
 	if errors.Is(err, raftio.ErrNoSavedLog) {
 		return true, nil
 	}
@@ -683,8 +743,8 @@ func (n *node) save(rec rsm.Task) error {
 	n.pendingSnapshot.apply(rec.SSRequest.Key, index == 0, false, index)
 	n.sysEvents.Publish(server.SystemEvent{
 		Type:      server.SnapshotCreated,
-		ClusterID: n.clusterID,
-		NodeID:    n.nodeID,
+		ShardID:   n.shardID,
+		ReplicaID: n.replicaID,
 	})
 	return nil
 }
@@ -740,21 +800,34 @@ func (n *node) doSave(req rsm.SSRequest) (uint64, error) {
 }
 
 func (n *node) compactLog(req rsm.SSRequest, index uint64) {
-	if overhead := n.compactionOverhead(req); index > overhead {
-		n.ss.setCompactLogTo(index - overhead)
+	if compactionIndex, ok := n.getCompactionIndex(req, index); ok {
+		n.ss.setCompactLogTo(compactionIndex)
 	}
 }
 
-func (n *node) compactionOverhead(req rsm.SSRequest) uint64 {
+func (n *node) getCompactionIndex(req rsm.SSRequest, index uint64) (uint64, bool) {
 	if req.OverrideCompaction {
-		return req.CompactionOverhead
+		if req.CompactionIndex > 0 {
+			if index >= req.CompactionIndex+1 {
+				return req.CompactionIndex, true
+			}
+			return 0, false
+		}
+		if index > req.CompactionOverhead {
+			return index - req.CompactionOverhead, true
+		}
+		return 0, false
 	}
-	return n.config.CompactionOverhead
+	if index > n.config.CompactionOverhead {
+		return index - n.config.CompactionOverhead, true
+	}
+
+	return 0, false
 }
 
 func (n *node) stream(sink pb.IChunkSink) error {
 	if sink != nil {
-		plog.Infof("%s requested to stream to %d", n.id(), sink.ToNodeID())
+		plog.Infof("%s requested to stream to %d", n.id(), sink.ToReplicaID())
 		if err := n.sm.Stream(sink); err != nil {
 			if !streamAborted(err) {
 				return errors.Wrapf(err, "%s stream failed", n.id())
@@ -806,8 +879,8 @@ func (n *node) recover(rec rsm.Task) (_ uint64, err error) {
 	}
 	n.sysEvents.Publish(server.SystemEvent{
 		Type:      server.SnapshotRecovered,
-		ClusterID: n.clusterID,
-		NodeID:    n.nodeID,
+		ShardID:   n.shardID,
+		ReplicaID: n.replicaID,
 		Index:     ss.Index,
 	})
 	return ss.Index, nil
@@ -872,16 +945,16 @@ func (n *node) removeLog() error {
 				return err
 			}
 		}
-		if err := n.logdb.RemoveEntriesTo(n.clusterID,
-			n.nodeID, compactTo); err != nil {
+		if err := n.logdb.RemoveEntriesTo(n.shardID,
+			n.replicaID, compactTo); err != nil {
 			return err
 		}
 		plog.Infof("%s compacted log up to index %d", n.id(), compactTo)
 		n.ss.setCompactedTo(compactTo)
 		n.sysEvents.Publish(server.SystemEvent{
 			Type:      server.LogCompacted,
-			ClusterID: n.clusterID,
-			NodeID:    n.nodeID,
+			ShardID:   n.shardID,
+			ReplicaID: n.replicaID,
 			Index:     compactTo,
 		})
 		if !n.config.DisableAutoCompactions {
@@ -897,14 +970,14 @@ func (n *node) removeLog() error {
 
 func (n *node) requestCompaction() (*SysOpState, error) {
 	if compactTo := n.ss.getCompactedTo(); compactTo > 0 {
-		done, err := n.logdb.CompactEntriesTo(n.clusterID, n.nodeID, compactTo)
+		done, err := n.logdb.CompactEntriesTo(n.shardID, n.replicaID, compactTo)
 		if err != nil {
 			return nil, err
 		}
 		n.sysEvents.Publish(server.SystemEvent{
 			Type:      server.LogDBCompacted,
-			ClusterID: n.clusterID,
-			NodeID:    n.nodeID,
+			ShardID:   n.shardID,
+			ReplicaID: n.replicaID,
 			Index:     compactTo,
 		})
 		return &SysOpState{completedC: done}, nil
@@ -917,13 +990,13 @@ func isFreeOrderMessage(m pb.Message) bool {
 }
 
 func (n *node) sendEnterQuiesceMessages() {
-	for nodeID := range n.sm.GetMembership().Addresses {
-		if nodeID != n.nodeID {
+	for replicaID := range n.sm.GetMembership().Addresses {
+		if replicaID != n.replicaID {
 			msg := pb.Message{
-				Type:      pb.Quiesce,
-				From:      n.nodeID,
-				To:        nodeID,
-				ClusterId: n.clusterID,
+				Type:    pb.Quiesce,
+				From:    n.replicaID,
+				To:      replicaID,
+				ShardID: n.shardID,
 			}
 			n.sendRaftMessage(msg)
 		}
@@ -933,7 +1006,7 @@ func (n *node) sendEnterQuiesceMessages() {
 func (n *node) sendMessages(msgs []pb.Message) {
 	for _, msg := range msgs {
 		if !isFreeOrderMessage(msg) {
-			msg.ClusterId = n.clusterID
+			msg.ShardID = n.shardID
 			n.sendRaftMessage(msg)
 		}
 	}
@@ -942,7 +1015,7 @@ func (n *node) sendMessages(msgs []pb.Message) {
 func (n *node) sendReplicateMessages(ud pb.Update) {
 	for _, msg := range ud.Messages {
 		if isFreeOrderMessage(msg) {
-			msg.ClusterId = n.clusterID
+			msg.ShardID = n.shardID
 			n.sendRaftMessage(msg)
 		}
 	}
@@ -1134,6 +1207,13 @@ func (n *node) handleEvents() (bool, error) {
 	if n.handleCompaction() {
 		hasEvent = true
 	}
+	event, err = n.handleLogQuery()
+	if err != nil {
+		return false, err
+	}
+	if event {
+		hasEvent = true
+	}
 	n.gc()
 	if hasEvent {
 		n.pendingReadIndexes.applied(lastApplied)
@@ -1152,6 +1232,17 @@ func (n *node) gc() {
 
 func (n *node) handleCompaction() bool {
 	return n.ss.hasCompactedTo() || n.ss.hasCompactLogTo()
+}
+
+func (n *node) handleLogQuery() (bool, error) {
+	if req := n.pendingRaftLogQuery.get(); req != nil {
+		if err := n.p.QueryRaftLog(req.logRange.FirstIndex,
+			req.logRange.LastIndex, req.maxSize); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (n *node) handleLeaderTransfer() (bool, error) {
@@ -1334,7 +1425,7 @@ func (n *node) handleSnapshotTask(task rsm.Task) {
 		n.reportSaveSnapshot(task)
 	} else if task.Stream {
 		if !n.canStream() {
-			n.reportSnapshotStatus(task.ClusterID, task.NodeID, true)
+			n.reportSnapshotStatus(task.ShardID, task.ReplicaID, true)
 			return
 		}
 		n.reportStreamSnapshot(task)
@@ -1343,23 +1434,23 @@ func (n *node) handleSnapshotTask(task rsm.Task) {
 	}
 }
 
-func (n *node) reportSnapshotStatus(clusterID uint64,
-	nodeID uint64, failed bool) {
-	n.handleSnapshotStatus(clusterID, nodeID, failed)
+func (n *node) reportSnapshotStatus(shardID uint64,
+	replicaID uint64, failed bool) {
+	n.handleSnapshotStatus(shardID, replicaID, failed)
 }
 
 func (n *node) reportStreamSnapshot(rec rsm.Task) {
 	n.ss.setStreaming()
 	getSinkFn := func() pb.IChunkSink {
-		conn := n.getStreamSink(rec.ClusterID, rec.NodeID)
+		conn := n.getStreamSink(rec.ShardID, rec.ReplicaID)
 		if conn == nil {
-			plog.Errorf("failed to connect to %s", dn(rec.ClusterID, rec.NodeID))
+			plog.Errorf("failed to connect to %s", dn(rec.ShardID, rec.ReplicaID))
 			return nil
 		}
 		return conn
 	}
 	n.ss.setStreamReq(rec, getSinkFn)
-	n.pipeline.setStreamReady(n.clusterID)
+	n.pipeline.setStreamReady(n.shardID)
 }
 
 func (n *node) canStream() bool {
@@ -1377,13 +1468,13 @@ func (n *node) canStream() bool {
 func (n *node) reportSaveSnapshot(rec rsm.Task) {
 	n.ss.setSaving()
 	n.ss.setSaveReq(rec)
-	n.pipeline.setSaveReady(n.clusterID)
+	n.pipeline.setSaveReady(n.shardID)
 }
 
 func (n *node) reportRecoverSnapshot(rec rsm.Task) {
 	n.ss.setRecovering()
 	n.ss.setRecoverReq(rec)
-	n.pipeline.setRecoverReady(n.clusterID)
+	n.pipeline.setRecoverReady(n.shardID)
 }
 
 // returns a boolean flag indicating whether to skip task handling for the
@@ -1432,8 +1523,8 @@ func (n *node) processRecoverStatus() bool {
 			n.setInitialStatus(rec.Index)
 			n.sysEvents.Publish(server.SystemEvent{
 				Type:      server.NodeReady,
-				ClusterID: n.clusterID,
-				NodeID:    n.nodeID,
+				ShardID:   n.shardID,
+				ReplicaID: n.replicaID,
 			})
 		}
 		n.ss.clearRecovering()
@@ -1492,40 +1583,50 @@ func (n *node) notifyConfigChange() {
 	if len(m.Addresses) == 0 {
 		plog.Panicf("empty nodes %s", n.id())
 	}
-	_, isNonVoting := m.NonVotings[n.nodeID]
-	_, isWitness := m.Witnesses[n.nodeID]
-	ci := &ClusterInfo{
-		ClusterID:         n.clusterID,
-		NodeID:            n.nodeID,
-		IsLeader:          n.isLeader(),
+	_, isNonVoting := m.NonVotings[n.replicaID]
+	_, isWitness := m.Witnesses[n.replicaID]
+	ci := &ShardInfo{
+		ShardID:           n.shardID,
+		ReplicaID:         n.replicaID,
 		IsNonVoting:       isNonVoting,
 		IsWitness:         isWitness,
 		ConfigChangeIndex: m.ConfigChangeId,
 		Nodes:             m.Addresses,
 	}
-	n.clusterInfo.Store(ci)
+	n.shardInfo.Store(ci)
 	n.sysEvents.Publish(server.SystemEvent{
 		Type:      server.MembershipChanged,
-		ClusterID: n.clusterID,
-		NodeID:    n.nodeID,
+		ShardID:   n.shardID,
+		ReplicaID: n.replicaID,
 	})
 }
 
-func (n *node) getClusterInfo() *ClusterInfo {
-	v := n.clusterInfo.Load()
+func (n *node) getShardInfo() ShardInfo {
+	v := n.shardInfo.Load()
 	if v == nil {
-		return &ClusterInfo{
-			ClusterID:        n.clusterID,
-			NodeID:           n.nodeID,
+		return ShardInfo{
+			ShardID:          n.shardID,
+			ReplicaID:        n.replicaID,
 			Pending:          true,
 			StateMachineType: sm.Type(n.sm.Type()),
 		}
 	}
-	ci := v.(*ClusterInfo)
-	return &ClusterInfo{
-		ClusterID:         ci.ClusterID,
-		NodeID:            ci.NodeID,
-		IsLeader:          n.isLeader(),
+	ci := v.(*ShardInfo)
+
+	leaderID := uint64(0)
+	term := uint64(0)
+	lv := n.leaderInfo.Load()
+	if lv != nil {
+		leaderInfo := lv.(*leaderInfo)
+		leaderID = leaderInfo.leaderID
+		term = leaderInfo.term
+	}
+
+	return ShardInfo{
+		ShardID:           ci.ShardID,
+		ReplicaID:         ci.ReplicaID,
+		LeaderID:          leaderID,
+		Term:              term,
 		IsNonVoting:       ci.IsNonVoting,
 		ConfigChangeIndex: ci.ConfigChangeIndex,
 		Nodes:             ci.Nodes,
@@ -1542,21 +1643,35 @@ func (n *node) logDBBusy() bool {
 }
 
 func (n *node) id() string {
-	return dn(n.clusterID, n.nodeID)
+	return dn(n.shardID, n.replicaID)
 }
 
 func (n *node) ssid(index uint64) string {
-	return logutil.DescribeSS(n.clusterID, n.nodeID, index)
+	return logutil.DescribeSS(n.shardID, n.replicaID, index)
 }
 
 func (n *node) isLeader() bool {
-	leaderID, ok := n.getLeaderID()
-	return ok && n.nodeID == leaderID
+	v := n.leaderInfo.Load()
+	if v == nil {
+		return false
+	}
+	leaderInfo := v.(*leaderInfo)
+	if leaderInfo.term == 0 {
+		return false
+	}
+	return n.replicaID == leaderInfo.leaderID
 }
 
 func (n *node) isFollower() bool {
-	leaderID, ok := n.getLeaderID()
-	return ok && n.nodeID != leaderID
+	v := n.leaderInfo.Load()
+	if v == nil {
+		return false
+	}
+	leaderInfo := v.(*leaderInfo)
+	if leaderInfo.term == 0 {
+		return false
+	}
+	return n.replicaID != leaderInfo.leaderID
 }
 
 func (n *node) initialized() bool {

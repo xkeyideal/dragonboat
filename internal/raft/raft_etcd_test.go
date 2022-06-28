@@ -33,10 +33,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	"github.com/lni/dragonboat/v3/internal/server"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	"github.com/lni/dragonboat/v4/internal/server"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 var (
@@ -178,6 +178,35 @@ func TestLeaderTransferToUpToDateNodeFromFollower(t *testing.T) {
 	// After some log replication, transfer leadership back to 1.
 	nt.send(pb.Message{From: 1, To: 1, Type: pb.Propose, Entries: []pb.Entry{{}}})
 	nt.send(pb.Message{From: 1, To: 1, Hint: 1, Type: pb.LeaderTransfer})
+	checkLeaderTransferState(t, lead, leader, 1)
+}
+
+// TestLeaderTransferWithPreVote ensures transferring leader still works
+// even the current leader is still under its leader lease
+func TestLeaderTransferWithPreVote(t *testing.T) {
+	nt := newNetwork(nil, nil, nil)
+	for i := uint64(1); i < 4; i++ {
+		r := nt.peers[i].(*raft)
+		r.checkQuorum = true
+		r.preVote = true
+		setRandomizedElectionTimeout(r, r.electionTimeout+i)
+	}
+	// Letting peer 2 electionElapsed reach to timeout so that it can vote for peer 1
+	f := nt.peers[2].(*raft)
+	for i := uint64(0); i < f.electionTimeout; i++ {
+		ne(f.tick(), t)
+	}
+	nt.send(pb.Message{From: 1, To: 1, Type: pb.Election})
+	lead := nt.peers[1].(*raft)
+	if lead.leaderID != 1 {
+		t.Fatalf("after election leader is %x, want 1", lead.leaderID)
+	}
+	// Transfer leadership to 2.
+	nt.send(pb.Message{From: 2, To: 1, Hint: 2, Type: pb.LeaderTransfer})
+	checkLeaderTransferState(t, lead, follower, 2)
+	// After some log replication, transfer leadership back to 1.
+	nt.send(pb.Message{From: 1, To: 1, Type: pb.Propose, Entries: []pb.Entry{{}}})
+	nt.send(pb.Message{From: 1, To: 2, Hint: 1, Type: pb.LeaderTransfer})
 	checkLeaderTransferState(t, lead, leader, 1)
 }
 
@@ -477,7 +506,7 @@ func TestLeaderCycle(t *testing.T) {
 	testLeaderCycle(t)
 }
 
-// testLeaderCycle verifies that each node in a cluster can campaign
+// testLeaderCycle verifies that each node in a shard can campaign
 // and be elected in turn. This ensures that elections (including
 // pre-vote) work when not starting from a clean slate (as they do in
 // TestLeaderElection)
@@ -489,13 +518,13 @@ func testLeaderCycle(t *testing.T) {
 
 		for _, peer := range n.peers {
 			sm := peer.(*raft)
-			if sm.nodeID == campaignerID && sm.state != leader {
+			if sm.replicaID == campaignerID && sm.state != leader {
 				t.Errorf("campaigning node %d state = %v, want leader",
-					sm.nodeID, sm.state)
-			} else if sm.nodeID != campaignerID && sm.state != follower {
+					sm.replicaID, sm.state)
+			} else if sm.replicaID != campaignerID && sm.state != follower {
 				t.Errorf("after campaign of node %d, "+
 					"node %d had state = %v, want follower",
-					campaignerID, sm.nodeID, sm.state)
+					campaignerID, sm.replicaID, sm.state)
 			}
 		}
 	}
@@ -1220,10 +1249,10 @@ func TestStepIgnoreOldTermMsg(t *testing.T) {
 }
 
 // TestHandleMTReplicate ensures:
-// 1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
-// 2. If an existing entry conflicts with a new one (same index but different terms),
-//    delete the existing entry and all that follow it; append any new entries not already in the log.
-// 3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
+//  1. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm.
+//  2. If an existing entry conflicts with a new one (same index but different terms),
+//     delete the existing entry and all that follow it; append any new entries not already in the log.
+//  3. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry).
 func TestHandleMTReplicate(t *testing.T) {
 	tests := []struct {
 		m       pb.Message
@@ -1890,7 +1919,7 @@ func TestReadOnlyOptionSafe(t *testing.T) {
 			nt.send(pb.Message{From: 1, To: 1, Type: pb.Propose, Entries: []pb.Entry{{}}})
 		}
 
-		nt.send(pb.Message{From: tt.sm.nodeID, To: tt.sm.nodeID, Type: pb.ReadIndex, Hint: tt.wctx.Low, HintHigh: tt.wctx.High})
+		nt.send(pb.Message{From: tt.sm.replicaID, To: tt.sm.replicaID, Type: pb.ReadIndex, Hint: tt.wctx.Low, HintHigh: tt.wctx.High})
 
 		r := tt.sm
 		if len(r.readyToRead) == 0 {
@@ -2555,7 +2584,7 @@ func TestRemoveNode(t *testing.T) {
 		t.Errorf("nodes = %v, want %v", g, w)
 	}
 
-	// remove all nodes from cluster
+	// remove all nodes from shard
 	ne(r.removeNode(1), t)
 	w = []uint64{}
 	if g := r.nodesSorted(); !reflect.DeepEqual(g, w) {
@@ -2638,7 +2667,7 @@ func testCampaignWhileLeader(t *testing.T) {
 // TestCommitAfterRemoveNode verifies that pending commands can become
 // committed when a config change reduces the quorum requirements.
 func TestCommitAfterRemoveNode(t *testing.T) {
-	// Create a cluster with two nodes.
+	// Create a shard with two nodes.
 	s := NewTestLogDB()
 	r := newTestRaft(1, []uint64{1, 2}, 5, 1, s)
 	r.becomeCandidate()
@@ -2646,8 +2675,8 @@ func TestCommitAfterRemoveNode(t *testing.T) {
 
 	// Begin to remove the second node.
 	cc := pb.ConfigChange{
-		Type:   pb.RemoveNode,
-		NodeID: 2,
+		Type:      pb.RemoveNode,
+		ReplicaID: 2,
 	}
 	ccData, err := cc.Marshal()
 	if err != nil {
@@ -2904,7 +2933,7 @@ func newNetworkWithConfig(configFunc func(config.Config), peers ...stateMachine)
 				witnesses[i] = true
 			}
 
-			v.nodeID = id
+			v.replicaID = id
 			v.remotes = make(map[uint64]*remote)
 			v.nonVotings = make(map[uint64]*remote)
 			v.witnesses = make(map[uint64]*remote)
@@ -3025,7 +3054,7 @@ func newTestConfig(id uint64, election, heartbeat int) config.Config {
 
 func newRateLimitedTestConfig(id uint64, election, heartbeat int, maxLogSize int) config.Config {
 	return config.Config{
-		NodeID:          id,
+		ReplicaID:       id,
 		ElectionRTT:     uint64(election),
 		HeartbeatRTT:    uint64(heartbeat),
 		MaxInMemLogSize: uint64(maxLogSize),
@@ -3045,7 +3074,7 @@ func newTestRaft(id uint64, peers []uint64, election, heartbeat int, logdb ILogD
 
 func newRateLimitedTestRaft(id uint64, peers []uint64, election, heartbeat int, logdb ILogDB) *raft {
 	cfg := config.Config{
-		NodeID:          id,
+		ReplicaID:       id,
 		ElectionRTT:     uint64(election),
 		HeartbeatRTT:    uint64(heartbeat),
 		MaxInMemLogSize: testRateLimit,

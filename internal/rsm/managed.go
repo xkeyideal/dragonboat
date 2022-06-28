@@ -20,14 +20,14 @@ import (
 
 	"github.com/cockroachdb/errors"
 
-	"github.com/lni/dragonboat/v3/config"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/config"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 var (
-	// ErrClusterClosed indicates that the cluster has been closed
-	ErrClusterClosed = errors.New("raft cluster already closed")
+	// ErrShardClosed indicates that the shard has been closed
+	ErrShardClosed = errors.New("raft shard already closed")
 )
 
 // IStreamable is the interface for types that can be snapshot streamed.
@@ -93,8 +93,8 @@ func (cw *countedWriter) Write(data []byte) (int, error) {
 
 // ManagedStateMachineFactory is the factory function type for creating an
 // IManagedStateMachine instance.
-type ManagedStateMachineFactory func(clusterID uint64,
-	nodeID uint64, stopc <-chan struct{}) IManagedStateMachine
+type ManagedStateMachineFactory func(shardID uint64,
+	replicaID uint64, stopc <-chan struct{}) IManagedStateMachine
 
 // NativeSM is the IManagedStateMachine object used to manage native
 // data store in Golang.
@@ -122,8 +122,8 @@ func NewNativeSM(config config.Config, ism IStateMachine,
 		ue:     make([]sm.Entry, 1),
 	}
 	s.OffloadedStatus.DestroyedC = make(chan struct{})
-	s.OffloadedStatus.clusterID = config.ClusterID
-	s.OffloadedStatus.nodeID = config.NodeID
+	s.OffloadedStatus.shardID = config.ShardID
+	s.OffloadedStatus.replicaID = config.ReplicaID
 	return s
 }
 
@@ -211,7 +211,7 @@ func (ds *NativeSM) Lookup(query interface{}) (interface{}, error) {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	if ds.destroyed {
-		return nil, ErrClusterClosed
+		return nil, ErrShardClosed
 	}
 	return ds.sm.Lookup(query)
 }
@@ -226,7 +226,7 @@ func (ds *NativeSM) NALookup(query []byte) ([]byte, error) {
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 	if ds.destroyed {
-		return nil, ErrClusterClosed
+		return nil, ErrShardClosed
 	}
 	return ds.sm.NALookup(query)
 }

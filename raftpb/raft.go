@@ -22,10 +22,10 @@ import (
 
 	"github.com/lni/goutils/stringutil"
 
-	"github.com/lni/dragonboat/v3/client"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	"github.com/lni/dragonboat/v3/logger"
+	"github.com/lni/dragonboat/v4/client"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	"github.com/lni/dragonboat/v4/logger"
 )
 
 var (
@@ -248,8 +248,8 @@ type IChunkSink interface {
 	// return (sent, stopped)
 	Receive(chunk Chunk) (bool, bool)
 	Close() error
-	ClusterID() uint64
-	ToNodeID() uint64
+	ShardID() uint64
+	ToReplicaID() uint64
 }
 
 var (

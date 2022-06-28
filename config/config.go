@@ -30,13 +30,13 @@ import (
 	"github.com/lni/goutils/netutil"
 	"github.com/lni/goutils/stringutil"
 
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	"github.com/lni/dragonboat/v3/internal/id"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	"github.com/lni/dragonboat/v3/logger"
-	"github.com/lni/dragonboat/v3/raftio"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	"github.com/lni/dragonboat/v4/internal/id"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	"github.com/lni/dragonboat/v4/logger"
+	"github.com/lni/dragonboat/v4/raftio"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 var (
@@ -63,10 +63,11 @@ const (
 
 // Config is used to configure Raft nodes.
 type Config struct {
-	// NodeID is a non-zero value used to identify a node within a Raft cluster.
-	NodeID uint64
-	// ClusterID is the unique value used to identify a Raft cluster.
-	ClusterID uint64
+	// ReplicaID is a non-zero value used to identify a node within a Raft shard.
+	ReplicaID uint64
+	// ShardID is the unique value used to identify a Raft group that contains
+	// multiple replicas.
+	ShardID uint64
 	// CheckQuorum specifies whether the leader node should periodically check
 	// non-leader node status and step down to become a follower node when it no
 	// longer has the quorum.
@@ -171,7 +172,7 @@ type Config struct {
 	DisableAutoCompactions bool
 	// IsNonVoting indicates whether this is a non-voting Raft node. Described as
 	// non-voting members in the section 4.2.1 of Diego Ongaro's thesis, they are
-	// used to allow a new node to join the cluster and catch up with other
+	// used to allow a new node to join the shard and catch up with other
 	// existing ndoes without impacting the availability. Extra non-voting nodes
 	// can also be introduced to serve read-only requests.
 	IsNonVoting bool
@@ -186,8 +187,8 @@ type Config struct {
 	//
 	// Witness support is currently experimental.
 	IsWitness bool
-	// Quiesce specifies whether to let the Raft cluster enter quiesce mode when
-	// there is no cluster activity. Clusters in quiesce mode do not exchange
+	// Quiesce specifies whether to let the Raft shard enter quiesce mode when
+	// there is no shard activity. Shards in quiesce mode do not exchange
 	// heartbeat messages to minimize bandwidth consumption.
 	//
 	// Quiesce support is currently experimental.
@@ -197,8 +198,8 @@ type Config struct {
 // Validate validates the Config instance and return an error when any member
 // field is considered as invalid.
 func (c *Config) Validate() error {
-	if c.NodeID == 0 {
-		return errors.New("invalid NodeID, it must be >= 1")
+	if c.ReplicaID == 0 {
+		return errors.New("invalid ReplicaID, it must be >= 1")
 	}
 	if c.HeartbeatRTT == 0 {
 		return errors.New("HeartbeatRTT must be > 0")
@@ -252,6 +253,12 @@ type NodeHostConfig struct {
 	// thus allowing all NodeHost instances with deployment ID 0 to communicate
 	// with each other.
 	DeploymentID uint64
+	// NodeHostID specifies what NodeHostID to use. By default, when NodeHostID
+	// is empty, a random UUID will be generated and recorded by the system.
+	// Specifying a concrete NodeHostID here will cause the specified NodeHostID
+	// value to be used. NodeHostID is only used when AddressByNodeHostID is
+	// set to true.
+	NodeHostID string
 	// WALDir is the directory used for storing the WAL of Raft entries. It is
 	// recommended to use low latency storage such as NVME SSD with power loss
 	// protection to store such WAL data. Leave WALDir to have zero value will
@@ -288,7 +295,7 @@ type NodeHostConfig struct {
 	// AddressByNodeHostID indicates that NodeHost instances should be addressed
 	// by their NodeHostID values. This feature is usually used when only dynamic
 	// addresses are available. When enabled, NodeHostID values should be used
-	// as the target parameter when calling NodeHost's StartCluster,
+	// as the target parameter when calling NodeHost's StartShard,
 	// RequestAddNode, RequestAddNonVoting and RequestAddWitness methods.
 	//
 	// Enabling AddressByNodeHostID also enables the internal gossip service,
@@ -362,11 +369,11 @@ type NodeHostConfig struct {
 	// is unlimited.
 	MaxReceiveQueueSize uint64
 	// MaxSnapshotSendBytesPerSecond defines how much snapshot data can be sent
-	// every second for all Raft clusters managed by the NodeHost instance.
+	// every second for all Raft shards managed by the NodeHost instance.
 	// The default value 0 means there is no limit set for snapshot streaming.
 	MaxSnapshotSendBytesPerSecond uint64
 	// MaxSnapshotRecvBytesPerSecond defines how much snapshot data can be
-	// received each second for all Raft clusters managed by the NodeHost instance.
+	// received each second for all Raft shards managed by the NodeHost instance.
 	// The default value 0 means there is no limit for receiving snapshot data.
 	MaxSnapshotRecvBytesPerSecond uint64
 	// NotifyCommit specifies whether clients should be notified when their
@@ -407,7 +414,7 @@ type NodeHostConfig struct {
 	// When starting Raft nodes or requesting new nodes to be added, use the above
 	// mentioned NodeHostID values as the target parameters (which are of the
 	// Target type). Let's say we want to start a Raft Node as a part of a three
-	// replicas Raft cluster, the initialMembers parameter of the StartCluster
+	// replicas Raft shard, the initialMembers parameter of the StartShard
 	// method can be set to
 	//
 	// initialMembers := map[uint64]Target {
@@ -416,9 +423,9 @@ type NodeHostConfig struct {
 	//   3: "nhid-zzzzz",
 	// }
 	//
-	// This indicates that node 1 of the cluster will be running on the NodeHost
+	// This indicates that node 1 of the shard will be running on the NodeHost
 	// instance identified by the NodeHostID value "nhid-xxxxx", node 2 of the
-	// same cluster will be running on the NodeHost instance identified by the
+	// same shard will be running on the NodeHost instance identified by the
 	// NodeHostID value of "nhid-yyyyy" and so on.
 	//
 	// The internal gossip service exchanges NodeHost details, including their
@@ -934,9 +941,6 @@ type ExpertConfig struct {
 	LogDB LogDBConfig
 	// FS is the filesystem instance used in tests.
 	FS IFS
-	// TestNodeHostID is the NodeHostID value to be used by the NodeHost instance.
-	// This field is expected to be used in tests only.
-	TestNodeHostID uint64
 	// TestGossipProbeInterval define the probe interval used by the gossip
 	// service in tests.
 	TestGossipProbeInterval time.Duration
@@ -970,6 +974,9 @@ type GossipConfig struct {
 	// include AdvertiseAddresses from other NodeHost instances that you plan to
 	// launch shortly afterwards.
 	Seed []string
+	// Meta is the extra metadata to be included in gossip node's Meta field. It
+	// will be propagated to all other NodeHost instances via gossip.
+	Meta []byte
 }
 
 // IsEmpty returns a boolean flag indicating whether the GossipConfig instance

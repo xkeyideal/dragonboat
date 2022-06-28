@@ -27,14 +27,14 @@ import (
 
 	"github.com/lni/goutils/syncutil"
 
-	"github.com/lni/dragonboat/v3"
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/logdb"
-	"github.com/lni/dragonboat/v3/internal/logdb/kv/pebble"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	"github.com/lni/dragonboat/v3/logger"
-	"github.com/lni/dragonboat/v3/raftio"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/logdb"
+	"github.com/lni/dragonboat/v4/internal/logdb/kv/pebble"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	"github.com/lni/dragonboat/v4/logger"
+	"github.com/lni/dragonboat/v4/raftio"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 const (
@@ -44,7 +44,7 @@ const (
 	raftAddress2       = "localhost:26001"
 )
 
-var clustercount = flag.Int("num-of-clusters", 48, "number of raft clusters")
+var shardcount = flag.Int("num-of-shards", 48, "number of raft shards")
 var read = flag.Bool("enable-read", false, "enable read")
 var readonly = flag.Bool("read-only", false, "read only")
 var batched = flag.Bool("batched-logdb", false, "use batched logdb")
@@ -71,7 +71,7 @@ func (batchedLogDBFactory) Name() string {
 
 type dummyStateMachine struct{}
 
-func newDummyStateMachine(clusterID uint64, nodeID uint64) sm.IStateMachine {
+func newDummyStateMachine(shardID uint64, replicaID uint64) sm.IStateMachine {
 	return &dummyStateMachine{}
 }
 
@@ -79,7 +79,7 @@ func (s *dummyStateMachine) Lookup(query interface{}) (interface{}, error) {
 	return query, nil
 }
 
-func (s *dummyStateMachine) Update(data []byte) (sm.Result, error) {
+func (s *dummyStateMachine) Update(e sm.Entry) (sm.Result, error) {
 	return sm.Result{Value: 1}, nil
 }
 
@@ -184,8 +184,8 @@ func main() {
 		defer nh2.Close()
 	}
 	rc := config.Config{
-		ClusterID:       1,
-		NodeID:          1,
+		ShardID:         1,
+		ReplicaID:       1,
 		ElectionRTT:     10,
 		HeartbeatRTT:    1,
 		CheckQuorum:     true,
@@ -197,22 +197,22 @@ func main() {
 		nodes[2] = raftAddress2
 	}
 	nhList := make([]*dragonboat.NodeHost, 0)
-	for i := uint64(1); i <= uint64(*clustercount); i++ {
-		rc.ClusterID = i
-		if err := nh.StartCluster(nodes, false, newDummyStateMachine, rc); err != nil {
+	for i := uint64(1); i <= uint64(*shardcount); i++ {
+		rc.ShardID = i
+		if err := nh.StartReplica(nodes, false, newDummyStateMachine, rc); err != nil {
 			panic(err)
 		}
 		if *twonh {
 			rc2 := rc
-			rc2.NodeID = 2
-			if err := nh2.StartCluster(nodes, false, newDummyStateMachine, rc2); err != nil {
+			rc2.ReplicaID = 2
+			if err := nh2.StartReplica(nodes, false, newDummyStateMachine, rc2); err != nil {
 				panic(err)
 			}
 		}
 	}
-	for i := uint64(1); i <= uint64(*clustercount); i++ {
+	for i := uint64(1); i <= uint64(*shardcount); i++ {
 		for j := 0; j < 10000; j++ {
-			leaderID, ok, err := nh.GetLeaderID(i)
+			leaderID, _, ok, err := nh.GetLeaderID(i)
 			if err != nil {
 				panic(err)
 			}
@@ -237,10 +237,10 @@ func main() {
 			}
 		}
 	}
-	if len(nhList) != *clustercount {
+	if len(nhList) != *shardcount {
 		panic(fmt.Sprintf("nhList len unexpected, %d", len(nhList)))
 	}
-	fmt.Printf("clusters are ready, will run for %d seconds\n", *seconds)
+	fmt.Printf("shards are ready, will run for %d seconds\n", *seconds)
 	if *cpupprof {
 		f, err := os.Create("cpu.pprof")
 		if err != nil {
@@ -272,9 +272,9 @@ func main() {
 		for i := uint64(0); i < uint64(*clientcount); i++ {
 			workerID := i
 			stopper.RunWorker(func() {
-				clusterID := (workerID % uint64(*clustercount)) + 1
-				nh := nhList[clusterID-1]
-				cs := nh.GetNoOPSession(clusterID)
+				shardID := (workerID % uint64(*shardcount)) + 1
+				nh := nhList[shardID-1]
+				cs := nh.GetNoOPSession(shardID)
 				cmd := make([]byte, 16)
 				results[workerID] = 0
 				for {
@@ -303,11 +303,11 @@ func main() {
 		for i := uint64(0); i < uint64(*clientcount); i++ {
 			workerID := i
 			stopper.RunWorker(func() {
-				clusterID := (workerID % uint64(*clustercount)) + 1
-				nh := nhList[clusterID-1]
+				shardID := (workerID % uint64(*shardcount)) + 1
+				nh := nhList[shardID-1]
 				for {
 					for j := 0; j < 32; j++ {
-						rs, err := nh.ReadIndex(clusterID, 4*time.Second)
+						rs, err := nh.ReadIndex(shardID, 4*time.Second)
 						if err != nil {
 							panic(err)
 						}

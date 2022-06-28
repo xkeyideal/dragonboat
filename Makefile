@@ -23,8 +23,7 @@ PKGROOT=$(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 PKGNAME=$(shell go list)
 
 ifeq ($(DRAGONBOAT_LOGDB),rocksdb)
-LOGDB_TAG=dragonboat_rocksdb_test
-$(info using rocksdb based log storage)
+$(error rocksdb is no longer supported)
 else ifeq ($(DRAGONBOAT_LOGDB),)
 ifneq ($(MEMFS_TEST),)
 $(info using memfs based pebble)
@@ -100,15 +99,15 @@ TEST_OPTIONS=test $(GOCMDTAGS) -timeout=2400s -count=1 $(VERBOSE) \
 .PHONY: dragonboat-test
 dragonboat-test: test-raft test-raftpb test-rsm test-logdb test-transport    \
 	test-multiraft test-config test-client test-server test-tools test-fs   	 \
-	test-id test-utils
+	test-id test-utils test-tan test-registry
 .PHONY: ci-test
 ci-test: test-raft test-raftpb test-rsm test-logdb test-transport 		       \
   test-config test-client test-server test-tests test-tools test-fs 				 \
-	test-id test-utils
+	test-id test-utils test-tan test-registry
 .PHONY: test
 test: dragonboat-test test-tests
 .PHONY: dev-test
-dev-test: test test-plugins
+dev-test: test
 .PHONY: actions-test
 actions-test: ci-test test-cov
 
@@ -120,8 +119,8 @@ unit-test-bin: TEST_OPTIONS=test -c -o $@.bin -tags=$(TESTTAGS) 						 \
 	-count=1 $(VERBOSE) $(RACE_DETECTOR_FLAG) $(SELECTED_TEST_OPTION) 
 .PHONY: unit-test-bin
 unit-test-bin: test-raft test-raftpb test-rsm test-logdb test-transport 		 \
-  test-multiraft test-config test-client test-server test-tools test-plugins \
-	test-tests test-fs test-id test-utils
+  test-multiraft test-config test-client test-server test-tools \
+	test-tests test-fs test-id test-utils test-tan test-registry
 
 ###############################################################################
 # fast tests executed for every git push
@@ -129,7 +128,9 @@ unit-test-bin: test-raft test-raftpb test-rsm test-logdb test-transport 		 \
 .PHONY: benchmark
 benchmark:
 	$(GOTEST) $(SELECTED_BENCH_OPTION)
-
+.PHONY: benchmark-tan
+benchmark-tan:
+	$(GOTEST) $(SELECTED_BENCH_OPTION) $(PKGNAME)/internal/tan
 .PHONY: benchmark-fsync
 benchmark-fsync:
 	$(GOTEST)	-run ^$$ -bench=BenchmarkFSyncLatency
@@ -138,9 +139,6 @@ GOTEST=$(GO) $(TEST_OPTIONS)
 .PHONY: slow-test
 slow-test:
 	SLOW_TEST=1 $(GOTEST) $(PKGNAME)
-.PHONY: test-plugins
-test-plugins:
-	$(GOTEST) $(PKGNAME)/plugin
 .PHONY: test-server
 test-server:
 	$(GOTEST) $(PKGNAME)/internal/server
@@ -183,6 +181,12 @@ test-id:
 .PHONY: test-utils
 test-utils:
 	$(GOTEST) $(PKGNAME)/internal/utils/dio
+.PHONY: test-tan
+test-tan:
+	$(GOTEST) $(PKGNAME)/internal/tan
+.PHONY: test-registry
+test-registry:
+	$(GOTEST) $(PKGNAME)/internal/registry
 .PHONY: test-cov
 test-cov:
 	$(GOTEST) -coverprofile=coverage.txt -covermode=atomic
@@ -200,30 +204,22 @@ tools-checkdisk:
 ###############################################################################
 # static checks
 ###############################################################################
+.PHONY: install-static-check-tools
+install-static-check-tools:
+	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | bash -s -- -b $GOROOT/bin v1.45.2
+
 CHECKED_PKGS=$(shell go list ./...)
 CHECKED_DIRS=$(subst $(PKGNAME), ,$(subst $(PKGNAME)/, ,$(CHECKED_PKGS))) .
-EXTRA_LINTERS=-E misspell -E scopelint -E rowserrcheck -E depguard -E unconvert \
+EXTRA_LINTERS=-E misspell -E rowserrcheck -E depguard -E unconvert \
 	-E prealloc -E gofmt -E stylecheck
 .PHONY: static-check
 static-check:
-	@for p in $(CHECKED_PKGS); do \
-		go vet -tests=false $$p; \
-		golint $$p; \
-		errcheck -blank -ignoretests $$p; \
-	done;
 	@for p in $(CHECKED_DIRS); do \
-		ineffassign $$p; \
 		golangci-lint run $(EXTRA_LINTERS) $$p; \
 	done;
 
-# -E dupl is not included in regular static check as there are duplicated code
-# in auto generated code
-.PHONY: extra-static-check
 extra-static-check: override EXTRA_LINTERS :=-E dupl
-extra-static-check:
-	for p in $(CHECKED_DIRS); do \
-    golangci-lint run $(EXTRA_LINTERS) $$p; \
-  done;
+extra-static-check: static-check
 
 ###############################################################################
 # clean

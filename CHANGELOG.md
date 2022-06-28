@@ -1,10 +1,11 @@
-## v3.4 (TBD)
+## v4.0 (TBD)
 
-Dragonboat v3.4 comes with many improvements. All v3.3.x users are recommended to upgrade.
+Dragonboat v4.0 is a major release with new features, improvements and API changes.
 
 ### New features
 
 - Experimental Raft Pre-Vote support.
+- Experimental LogDB implementation called tan, it is significantly faster than Key-Value store based approach.
 
 ### Improvements
 
@@ -15,10 +16,14 @@ Dragonboat v3.4 comes with many improvements. All v3.3.x users are recommended t
 - Fixed unreachable notification.
 - Upgraded to a more recent version of pebble.
 - Non-voting node (used to be called observer node) support has been marked as production ready.
+- Made the experimental gossip feature a first class citizen of the library.
 
 ### Other changes
 
 - Raft observer node has been renamed as non-voting node.
+- RocksDB support has been removed as Pebble provides bidirectional compatible with RocksDB. 
+- ClusterID/NodeID has been renamed as ShardID/ReplicaID.
+- Deprecated v3.x features and APIs have been removed. 
 
 ## v3.3 (2021-01-20)
 
@@ -29,7 +34,7 @@ Dragonboat v3.3 is a major release that comes with new features and improvements
 - Pebble, which is bidirectional compatible with RocksDB, has been made the default engine for storing Raft Logs. RocksDB and CGO are no longer required.
 - Added the ability to slow down incoming proposals when the Raft Logs engine is highly loaded.
 - Added the option to get notified when proposals and config changes are committed.
-- Added a gossip service to allow NodeHosts to use dynamically assigned IP addresses as RaftAddress.
+- Added an experimental gossip service to allow NodeHosts to use dynamically assigned IP addresses as RaftAddress.
 - Added the ability to better control memory footprint.
 - Added ARM64/Linux as a new targeted platform.
 

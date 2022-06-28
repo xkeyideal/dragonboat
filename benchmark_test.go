@@ -24,19 +24,20 @@ import (
 	"github.com/golang/snappy"
 	"github.com/lni/goutils/random"
 
-	"github.com/lni/dragonboat/v3/client"
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/logdb"
-	"github.com/lni/dragonboat/v3/internal/rsm"
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/internal/tests"
-	"github.com/lni/dragonboat/v3/internal/transport"
-	"github.com/lni/dragonboat/v3/internal/utils/dio"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	"github.com/lni/dragonboat/v3/logger"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/client"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/logdb"
+	"github.com/lni/dragonboat/v4/internal/registry"
+	"github.com/lni/dragonboat/v4/internal/rsm"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/internal/tests"
+	"github.com/lni/dragonboat/v4/internal/transport"
+	"github.com/lni/dragonboat/v4/internal/utils/dio"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	"github.com/lni/dragonboat/v4/logger"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 func benchmarkAllocs(b *testing.B, sz uint64) {
@@ -129,7 +130,7 @@ func benchmarkProposeN(b *testing.B, sz int) {
 	}
 	total := uint32(0)
 	q := newEntryQueue(2048, 0)
-	cfg := config.Config{ClusterID: 1, NodeID: 1}
+	cfg := config.Config{ShardID: 1, ReplicaID: 1}
 	pp := newPendingProposal(cfg, false, p, q)
 	session := client.NewNoOPSession(1, random.LockGuardedRand)
 	b.RunParallel(func(pb *testing.PB) {
@@ -173,7 +174,7 @@ func BenchmarkPendingProposalNextKey(b *testing.B) {
 		return obj
 	}
 	q := newEntryQueue(2048, 0)
-	cfg := config.Config{ClusterID: 1, NodeID: 1}
+	cfg := config.Config{ShardID: 1, ReplicaID: 1}
 	pp := newPendingProposal(cfg, false, p, q)
 	b.RunParallel(func(pb *testing.PB) {
 		clientID := rand.Uint64()
@@ -254,17 +255,17 @@ func BenchmarkWorkerReady(b *testing.B) {
 	rc := newWorkReady(1)
 	b.RunParallel(func(pbt *testing.PB) {
 		for pbt.Next() {
-			rc.clusterReady(1)
+			rc.shardReady(1)
 		}
 	})
 }
 
-func BenchmarkReadyCluster(b *testing.B) {
+func BenchmarkReadyShard(b *testing.B) {
 	b.ReportAllocs()
-	rc := newReadyCluster()
+	rc := newReadyShard()
 	b.RunParallel(func(pbt *testing.PB) {
 		for pbt.Next() {
-			rc.setClusterReady(1)
+			rc.setShardReady(1)
 		}
 	})
 }
@@ -287,8 +288,8 @@ func BenchmarkFSyncLatency(b *testing.B) {
 		Cmd:         make([]byte, 8*1024),
 	}
 	u := pb.Update{
-		ClusterID:     1,
-		NodeID:        1,
+		ShardID:       1,
+		ReplicaID:     1,
 		EntriesToSave: []pb.Entry{e},
 	}
 	b.StartTimer()
@@ -307,7 +308,7 @@ func benchmarkSaveRaftState(b *testing.B, sz int) {
 	db := getNewTestDB("db", "lldb", vfs.DefaultFS)
 	defer os.RemoveAll(rdbTestDirectory)
 	defer db.Close()
-	clusterID := uint32(1)
+	shardID := uint32(1)
 	b.StartTimer()
 	b.RunParallel(func(pbt *testing.PB) {
 		ldb, ok := db.(*logdb.ShardedDB)
@@ -325,11 +326,11 @@ func benchmarkSaveRaftState(b *testing.B, sz int) {
 			RespondedTo: 12843550,
 			Cmd:         make([]byte, sz),
 		}
-		cid := uint64(atomic.AddUint32(&clusterID, 1))
+		cid := uint64(atomic.AddUint32(&shardID, 1))
 		bytes := e.Size() * 128
 		u := pb.Update{
-			ClusterID: cid,
-			NodeID:    1,
+			ShardID:   cid,
+			ReplicaID: 1,
 		}
 		iidx := e.Index
 		for i := uint64(0); i < 128; i++ {
@@ -380,15 +381,15 @@ func (h *benchmarkMessageHandler) HandleMessageBatch(batch pb.MessageBatch) (uin
 	return 0, 0
 }
 
-func (h *benchmarkMessageHandler) HandleUnreachable(clusterID uint64, nodeID uint64) {
+func (h *benchmarkMessageHandler) HandleUnreachable(shardID uint64, replicaID uint64) {
 }
 
-func (h *benchmarkMessageHandler) HandleSnapshotStatus(clusterID uint64,
-	nodeID uint64, rejected bool) {
+func (h *benchmarkMessageHandler) HandleSnapshotStatus(shardID uint64,
+	replicaID uint64, rejected bool) {
 }
 
-func (h *benchmarkMessageHandler) HandleSnapshot(clusterID uint64,
-	nodeID uint64, from uint64) {
+func (h *benchmarkMessageHandler) HandleSnapshot(shardID uint64,
+	replicaID uint64, from uint64) {
 }
 
 type dummyTransportEvent struct{}
@@ -425,8 +426,8 @@ func benchmarkTransport(b *testing.B, sz int) {
 	if err != nil {
 		b.Fatalf("failed to new context %v", err)
 	}
-	nodes1 := transport.NewNodeRegistry(settings.Soft.StreamConnections, nil)
-	nodes2 := transport.NewNodeRegistry(settings.Soft.StreamConnections, nil)
+	nodes1 := registry.NewNodeRegistry(settings.Soft.StreamConnections, nil)
+	nodes2 := registry.NewNodeRegistry(settings.Soft.StreamConnections, nil)
 	nodes1.Add(1, 2, addr2)
 	handler1 := &benchmarkMessageHandler{
 		ch:       make(chan struct{}, 1),
@@ -469,14 +470,14 @@ func benchmarkTransport(b *testing.B, sz int) {
 	}
 	for i := 0; i < 128; i++ {
 		m := pb.Message{
-			Type:      pb.Replicate,
-			To:        2,
-			From:      1,
-			ClusterId: 1,
-			Term:      100,
-			LogTerm:   100,
-			LogIndex:  123456789,
-			Commit:    123456789,
+			Type:     pb.Replicate,
+			To:       2,
+			From:     1,
+			ShardID:  1,
+			Term:     100,
+			LogTerm:  100,
+			LogIndex: 123456789,
+			Commit:   123456789,
 		}
 		for j := 0; j < 64; j++ {
 			m.Entries = append(m.Entries, e)
@@ -510,7 +511,7 @@ func BenchmarkLookup(b *testing.B) {
 	b.StopTimer()
 	ds := &tests.NoOP{}
 	done := make(chan struct{})
-	config := config.Config{ClusterID: 1, NodeID: 1}
+	config := config.Config{ShardID: 1, ReplicaID: 1}
 	nds := rsm.NewNativeSM(config, rsm.NewInMemStateMachine(ds), done)
 	input := make([]byte, 1)
 	b.StartTimer()
@@ -530,7 +531,7 @@ func BenchmarkNALookup(b *testing.B) {
 	b.StopTimer()
 	ds := &tests.NoOP{}
 	done := make(chan struct{})
-	config := config.Config{ClusterID: 1, NodeID: 1}
+	config := config.Config{ShardID: 1, ReplicaID: 1}
 	nds := rsm.NewNativeSM(config, rsm.NewInMemStateMachine(ds), done)
 	input := make([]byte, 1)
 	b.StartTimer()
@@ -550,7 +551,7 @@ func benchmarkStateMachineStep(b *testing.B, sz int, noopSession bool) {
 	b.StopTimer()
 	ds := &tests.NoOP{NoAlloc: true}
 	done := make(chan struct{})
-	config := config.Config{ClusterID: 1, NodeID: 1}
+	config := config.Config{ShardID: 1, ReplicaID: 1}
 	nds := rsm.NewNativeSM(config, rsm.NewInMemStateMachine(ds), done)
 	smo := rsm.NewStateMachine(nds, nil, config, &testDummyNodeProxy{}, vfs.DefaultFS)
 	idx := uint64(0)
@@ -559,8 +560,8 @@ func benchmarkStateMachineStep(b *testing.B, sz int, noopSession bool) {
 		s = client.NewNoOPSession(1, random.LockGuardedRand)
 	} else {
 		s = &client.Session{
-			ClusterID: 1,
-			ClientID:  1234576,
+			ShardID:  1,
+			ClientID: 1234576,
 		}
 	}
 	e := pb.Entry{
@@ -631,8 +632,8 @@ type noopSink struct{}
 
 func (n *noopSink) Receive(pb.Chunk) (bool, bool) { return true, false }
 func (n *noopSink) Close() error                  { return nil }
-func (n *noopSink) ClusterID() uint64             { return 1 }
-func (n *noopSink) ToNodeID() uint64              { return 1 }
+func (n *noopSink) ShardID() uint64               { return 1 }
+func (n *noopSink) ToReplicaID() uint64           { return 1 }
 
 func BenchmarkChunkWriter(b *testing.B) {
 	sink := &noopSink{}

@@ -15,8 +15,31 @@
 package raftpb
 
 import (
+	"bytes"
 	"encoding/binary"
+	"io"
 )
+
+// LeaderUpdate describes updated leader
+type LeaderUpdate struct {
+	LeaderID uint64
+	Term     uint64
+}
+
+// LogQueryResult is the result of log query.
+type LogQueryResult struct {
+	FirstIndex uint64
+	LastIndex  uint64
+	Error      error
+	Entries    []Entry
+}
+
+// IsEmpty returns a boolean value indicating whether the LogQueryResult is
+// empty.
+func (r *LogQueryResult) IsEmpty() bool {
+	return r.FirstIndex == 0 && r.LastIndex == 0 &&
+		r.Error == nil && len(r.Entries) == 0
+}
 
 // SystemCtx is used to identify a ReadIndex operation.
 type SystemCtx struct {
@@ -49,8 +72,8 @@ type UpdateCommit struct {
 // processed by raft's upper layer to progress the raft node modelled as state
 // machine.
 type Update struct {
-	ClusterID uint64
-	NodeID    uint64
+	ShardID   uint64
+	ReplicaID uint64
 	// The current persistent state of a raft node. It must be stored onto
 	// persistent storage before any non-replication can be sent to other nodes.
 	// isStateEqual(emptyState) returns true when the state is empty.
@@ -84,6 +107,8 @@ type Update struct {
 	// DroppedReadIndexes is a list of read index requests  dropped when no leader
 	// is available.
 	DroppedReadIndexes []SystemCtx
+	LogQueryResult     LogQueryResult
+	LeaderUpdate       LeaderUpdate
 }
 
 // HasUpdate returns a boolean value indicating whether the returned Update
@@ -101,7 +126,9 @@ func (u *Update) HasUpdate() bool {
 // MarshalTo encodes the fields that need to be persisted to the specified
 // buffer.
 func (u *Update) MarshalTo(buf []byte) (int, error) {
-	offset := 0
+	n1 := binary.PutUvarint(buf, u.ShardID)
+	n2 := binary.PutUvarint(buf[n1:], u.ReplicaID)
+	offset := n1 + n2
 	if IsEmptyState(u.State) {
 		buf[offset] = 0
 		offset++
@@ -141,9 +168,32 @@ func (u *Update) MarshalTo(buf []byte) (int, error) {
 	return offset, nil
 }
 
+type countedByteReader struct {
+	reader io.ByteReader
+	count  int
+}
+
+func (r *countedByteReader) ReadByte() (byte, error) {
+	v, err := r.reader.ReadByte()
+	r.count++
+	return v, err
+}
+
 // Unmarshal decodes the Update state from the input buf.
 func (u *Update) Unmarshal(buf []byte) error {
-	offset := 0
+	r := &countedByteReader{
+		reader: bytes.NewReader(buf),
+	}
+	var err error
+	u.ShardID, err = binary.ReadUvarint(r)
+	if err != nil {
+		return err
+	}
+	u.ReplicaID, err = binary.ReadUvarint(r)
+	if err != nil {
+		return err
+	}
+	offset := r.count
 	if buf[offset] == 0 {
 		offset++
 	} else {
@@ -181,7 +231,7 @@ func (u *Update) Unmarshal(buf []byte) error {
 // SizeUpperLimit returns the upper limit of the estimated size of marshalled
 // Update instance.
 func (u *Update) SizeUpperLimit() int {
-	sz := 2 + 4
+	sz := 2 + 4 + 16
 	sz += int(GetEntrySliceSize(u.EntriesToSave))
 	sz += u.State.SizeUpperLimit()
 	if !IsEmptySnapshot(u.Snapshot) {

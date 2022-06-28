@@ -52,15 +52,16 @@ import (
 	circuit "github.com/lni/goutils/netutil/rubyist/circuitbreaker"
 	"github.com/lni/goutils/syncutil"
 
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/invariants"
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	"github.com/lni/dragonboat/v3/logger"
-	ct "github.com/lni/dragonboat/v3/plugin/chan"
-	"github.com/lni/dragonboat/v3/raftio"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/invariants"
+	"github.com/lni/dragonboat/v4/internal/registry"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	"github.com/lni/dragonboat/v4/logger"
+	ct "github.com/lni/dragonboat/v4/plugin/chan"
+	"github.com/lni/dragonboat/v4/raftio"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 const (
@@ -81,18 +82,12 @@ var (
 	dn                  = logutil.DescribeNode
 )
 
-// IResolver converts the (cluster id, node id( tuple to network address.
-type IResolver interface {
-	Resolve(uint64, uint64) (string, string, error)
-	Add(uint64, uint64, string)
-}
-
 // IMessageHandler is the interface required to handle incoming raft requests.
 type IMessageHandler interface {
 	HandleMessageBatch(batch pb.MessageBatch) (uint64, uint64)
-	HandleUnreachable(clusterID uint64, nodeID uint64)
-	HandleSnapshotStatus(clusterID uint64, nodeID uint64, rejected bool)
-	HandleSnapshot(clusterID uint64, nodeID uint64, from uint64)
+	HandleUnreachable(shardID uint64, replicaID uint64)
+	HandleSnapshotStatus(shardID uint64, replicaID uint64, rejected bool)
+	HandleSnapshot(shardID uint64, replicaID uint64, from uint64)
 }
 
 // ITransport is the interface of the transport layer used for exchanging
@@ -101,7 +96,7 @@ type ITransport interface {
 	Name() string
 	Send(pb.Message) bool
 	SendSnapshot(pb.Message) bool
-	GetStreamSink(clusterID uint64, nodeID uint64) *Sink
+	GetStreamSink(shardID uint64, replicaID uint64) *Sink
 	Close() error
 }
 
@@ -187,7 +182,7 @@ type Transport struct {
 	preSend      atomic.Value
 	postSend     atomic.Value
 	msgHandler   IMessageHandler
-	resolver     IResolver
+	resolver     registry.IResolver
 	trans        raftio.ITransport
 	fs           vfs.IFS
 	stopper      *syncutil.Stopper
@@ -205,7 +200,7 @@ var _ ITransport = (*Transport)(nil)
 
 // NewTransport creates a new Transport object.
 func NewTransport(nhConfig config.NodeHostConfig,
-	handler IMessageHandler, env *server.Env, resolver IResolver,
+	handler IMessageHandler, env *server.Env, resolver registry.IResolver,
 	dir server.SnapshotDirFunc, sysEvents ITransportEvent,
 	fs vfs.IFS) (*Transport, error) {
 	sourceID := nhConfig.RaftAddress
@@ -227,6 +222,19 @@ func NewTransport(nhConfig config.NodeHostConfig,
 		t.snapshotReceived, t.dir, t.nhConfig.GetDeploymentID(), fs)
 	t.trans = create(nhConfig, t.handleRequest, chunks.Add)
 	t.chunks = chunks
+	t.ctx, t.cancel = context.WithCancel(context.Background())
+	t.mu.queues = make(map[string]sendQueue)
+	t.mu.breakers = make(map[string]*circuit.Breaker)
+	msgConn := func() float64 {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return float64(len(t.mu.queues))
+	}
+	ssCount := func() float64 {
+		return float64(atomic.LoadUint64(&t.jobs))
+	}
+	t.metrics = newTransportMetrics(true, msgConn, ssCount)
+
 	plog.Infof("transport type: %s", t.trans.Name())
 	if err := t.trans.Start(); err != nil {
 		plog.Errorf("transport failed to start %v", err)
@@ -247,18 +255,6 @@ func NewTransport(nhConfig config.NodeHostConfig,
 			}
 		}
 	})
-	t.ctx, t.cancel = context.WithCancel(context.Background())
-	t.mu.queues = make(map[string]sendQueue)
-	t.mu.breakers = make(map[string]*circuit.Breaker)
-	msgConn := func() float64 {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		return float64(len(t.mu.queues))
-	}
-	ssCount := func() float64 {
-		return float64(atomic.LoadUint64(&t.jobs))
-	}
-	t.metrics = newTransportMetrics(true, msgConn, ssCount)
 	return t, nil
 }
 
@@ -322,7 +318,7 @@ func (t *Transport) handleRequest(req pb.MessageBatch) {
 	if len(addr) > 0 {
 		for _, r := range req.Requests {
 			if r.From != 0 {
-				t.resolver.Add(r.ClusterId, r.From, addr)
+				t.resolver.Add(r.ShardID, r.From, addr)
 			}
 		}
 	}
@@ -331,15 +327,15 @@ func (t *Transport) handleRequest(req pb.MessageBatch) {
 	t.metrics.receivedMessages(ssCount, msgCount, dropedMsgCount)
 }
 
-func (t *Transport) snapshotReceived(clusterID uint64,
-	nodeID uint64, from uint64) {
-	t.msgHandler.HandleSnapshot(clusterID, nodeID, from)
+func (t *Transport) snapshotReceived(shardID uint64,
+	replicaID uint64, from uint64) {
+	t.msgHandler.HandleSnapshot(shardID, replicaID, from)
 }
 
 func (t *Transport) notifyUnreachable(addr string, affected nodeMap) {
 	plog.Warningf("%s became unreachable, affected %d nodes", addr, len(affected))
 	for n := range affected {
-		t.msgHandler.HandleUnreachable(n.ClusterID, n.NodeID)
+		t.msgHandler.HandleUnreachable(n.ShardID, n.ReplicaID)
 	}
 }
 
@@ -359,13 +355,13 @@ func (t *Transport) send(req pb.Message) (bool, failedSend) {
 	if req.Type == pb.InstallSnapshot {
 		panic("snapshot message must be sent via its own channel.")
 	}
-	toNodeID := req.To
-	clusterID := req.ClusterId
+	toReplicaID := req.To
+	shardID := req.ShardID
 	from := req.From
-	addr, key, err := t.resolver.Resolve(clusterID, toNodeID)
+	addr, key, err := t.resolver.Resolve(shardID, toReplicaID)
 	if err != nil {
 		plog.Warningf("%s do not have the address for %s, dropping a message",
-			t.sourceID, dn(clusterID, toNodeID))
+			t.sourceID, dn(shardID, toReplicaID))
 		return false, unknownTarget
 	}
 	// fail fast
@@ -466,8 +462,8 @@ func (t *Transport) processMessages(remoteHost string,
 			return nil
 		case req := <-sq.ch:
 			n := raftio.NodeInfo{
-				ClusterID: req.ClusterId,
-				NodeID:    req.From,
+				ShardID:   req.ShardID,
+				ReplicaID: req.From,
 			}
 			affected[n] = struct{}{}
 			sq.decrease(req)

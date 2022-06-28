@@ -17,8 +17,8 @@ package dragonboat
 import (
 	"sync"
 
-	"github.com/lni/dragonboat/v3/raftio"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/raftio"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 type entryQueue struct {
@@ -163,28 +163,28 @@ func (q *readIndexQueue) get() []*RequestState {
 	return t[:sz]
 }
 
-type readyCluster struct {
+type readyShard struct {
 	mu    sync.Mutex
 	ready map[uint64]struct{}
 	maps  [2]map[uint64]struct{}
 	index uint8
 }
 
-func newReadyCluster() *readyCluster {
-	r := &readyCluster{}
+func newReadyShard() *readyShard {
+	r := &readyShard{}
 	r.maps[0] = make(map[uint64]struct{})
 	r.maps[1] = make(map[uint64]struct{})
 	r.ready = r.maps[0]
 	return r
 }
 
-func (r *readyCluster) setClusterReady(clusterID uint64) {
+func (r *readyShard) setShardReady(shardID uint64) {
 	r.mu.Lock()
-	r.ready[clusterID] = struct{}{}
+	r.ready[shardID] = struct{}{}
 	r.mu.Unlock()
 }
 
-func (r *readyCluster) getReadyClusters() map[uint64]struct{} {
+func (r *readyShard) getReadyShards() map[uint64]struct{} {
 	m := r.maps[(r.index+1)%2]
 	for k := range m {
 		delete(m, k)

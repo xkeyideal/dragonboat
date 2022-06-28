@@ -19,9 +19,9 @@ import (
 
 	"github.com/cockroachdb/errors"
 
-	"github.com/lni/dragonboat/v3/config"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/config"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 // IStateMachine is an adapter interface for underlying sm.IStateMachine,
@@ -76,7 +76,7 @@ func (i *InMemStateMachine) Update(entries []sm.Entry) ([]sm.Entry, error) {
 		panic("len(entries) != 1")
 	}
 	var err error
-	entries[0].Result, err = i.sm.Update(entries[0].Cmd)
+	entries[0].Result, err = i.sm.Update(entries[0])
 	return entries, errors.WithStack(err)
 }
 

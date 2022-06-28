@@ -19,12 +19,12 @@ import (
 	"io"
 	"time"
 
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/raftio"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/raftio"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 const (
@@ -133,8 +133,8 @@ func (cw *ChunkWriter) getHeader() []byte {
 
 func (cw *ChunkWriter) getChunk() pb.Chunk {
 	return pb.Chunk{
-		ClusterId:   cw.sink.ClusterID(),
-		NodeId:      cw.sink.ToNodeID(),
+		ShardID:     cw.sink.ShardID(),
+		ReplicaID:   cw.sink.ToReplicaID(),
 		From:        cw.meta.From,
 		ChunkId:     cw.chunkID,
 		FileChunkId: cw.chunkID,

@@ -21,10 +21,10 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 var (
@@ -297,9 +297,9 @@ func TestGetProcessedSnapshotRecord(t *testing.T) {
 			NonVotings: make(map[uint64]string),
 			Addresses:  make(map[uint64]string),
 		},
-		Type:      pb.OnDiskStateMachine,
-		ClusterId: 345,
-		Files:     make([]*pb.SnapshotFile, 0),
+		Type:    pb.OnDiskStateMachine,
+		ShardID: 345,
+		Files:   make([]*pb.SnapshotFile, 0),
 	}
 	ss.Membership.Addresses[1] = "a1"
 	ss.Membership.Addresses[2] = "a2"
@@ -327,8 +327,8 @@ func TestGetProcessedSnapshotRecord(t *testing.T) {
 	if newss.Index != ss.Index || newss.Term != ss.Term {
 		t.Errorf("index/term not copied")
 	}
-	if newss.Dummy != ss.Dummy || newss.ClusterId != ss.ClusterId || newss.Type != ss.Type {
-		t.Errorf("dummy/ClusterId/Type fields not copied")
+	if newss.Dummy != ss.Dummy || newss.ShardID != ss.ShardID || newss.Type != ss.Type {
+		t.Errorf("dummy/ShardId/Type fields not copied")
 	}
 	if fs.PathDir(newss.Filepath) != finalDir {
 		t.Errorf("filepath not processed %s", newss.Filepath)

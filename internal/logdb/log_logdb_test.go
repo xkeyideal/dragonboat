@@ -22,9 +22,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/lni/dragonboat/v3/internal/raft"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/internal/raft"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 func removeTestLogdbDir(fs vfs.IFS) {
@@ -35,7 +35,7 @@ func removeTestLogdbDir(fs vfs.IFS) {
 
 func getTestLogReaderWithoutCache(entries []pb.Entry) *LogReader {
 	logdb := getNewLogReaderTestDB(entries, vfs.GetTestFS())
-	ls := NewLogReader(LogReaderTestClusterID, LogReaderTestNodeID, logdb)
+	ls := NewLogReader(LogReaderTestShardID, LogReaderTestReplicaID, logdb)
 	ls.SetCompactor(testCompactor)
 	if len(entries) > 0 {
 		if err := ls.Append(entries); err != nil {
@@ -709,8 +709,8 @@ func TestRLLTSlice(t *testing.T) {
 			t.Fatalf("%v", err)
 		}
 		ud := pb.Update{
-			ClusterID:     LogReaderTestClusterID,
-			NodeID:        LogReaderTestNodeID,
+			ShardID:       LogReaderTestShardID,
+			ReplicaID:     LogReaderTestReplicaID,
 			EntriesToSave: []pb.Entry{{Index: offset + i, Term: offset + i}},
 		}
 		if err := stable.logdb.SaveRaftState([]pb.Update{ud}, 1); err != nil {

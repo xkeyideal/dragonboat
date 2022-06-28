@@ -23,19 +23,21 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/lni/goutils/random"
 
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	"github.com/lni/dragonboat/v3/internal/id"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/internal/utils"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	"github.com/lni/dragonboat/v3/logger"
-	"github.com/lni/dragonboat/v3/raftio"
-	"github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	"github.com/lni/dragonboat/v4/internal/id"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/internal/utils"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	"github.com/lni/dragonboat/v4/logger"
+	"github.com/lni/dragonboat/v4/raftio"
+	"github.com/lni/dragonboat/v4/raftpb"
 )
 
 var (
 	plog = logger.GetLogger("server")
+	// ErrNodeHostIDChanged indicates that NodeHostID changed.
+	ErrNodeHostIDChanged = errors.New("NodeHostID changed")
 	// ErrHardSettingChanged indicates that one or more of the hard settings
 	// changed.
 	ErrHardSettingChanged = errors.New("hard setting changed")
@@ -82,7 +84,7 @@ type Env struct {
 	fs           vfs.IFS
 	randomSource random.Source
 	partitioner  IPartitioner
-	nhid         *id.NodeHostID
+	nhid         *id.UUID
 	flocks       map[string]io.Closer
 	hostname     string
 	nhConfig     config.NodeHostConfig
@@ -93,7 +95,7 @@ func NewEnv(nhConfig config.NodeHostConfig, fs vfs.IFS) (*Env, error) {
 	s := &Env{
 		randomSource: random.NewLockedRand(),
 		nhConfig:     nhConfig,
-		partitioner:  NewFixedPartitioner(defaultClusterIDMod),
+		partitioner:  NewFixedPartitioner(defaultShardIDMod),
 		flocks:       make(map[string]io.Closer),
 		fs:           fs,
 	}
@@ -122,17 +124,17 @@ func (env *Env) GetRandomSource() random.Source {
 }
 
 // GetSnapshotDir returns the snapshot directory name.
-func (env *Env) GetSnapshotDir(did uint64, clusterID uint64,
-	nodeID uint64) string {
-	parts, _, _ := env.getSnapshotDirParts(did, clusterID, nodeID)
+func (env *Env) GetSnapshotDir(did uint64, shardID uint64,
+	replicaID uint64) string {
+	parts, _, _ := env.getSnapshotDirParts(did, shardID, replicaID)
 	return env.fs.PathJoin(parts...)
 }
 
 func (env *Env) getSnapshotDirParts(did uint64,
-	clusterID uint64, nodeID uint64) ([]string, string, []string) {
+	shardID uint64, replicaID uint64) ([]string, string, []string) {
 	dd := env.getDeploymentIDSubDirName(did)
-	pd := fmt.Sprintf("snapshot-part-%d", env.partitioner.GetPartitionID(clusterID))
-	sd := fmt.Sprintf("snapshot-%d-%d", clusterID, nodeID)
+	pd := fmt.Sprintf("snapshot-part-%d", env.partitioner.GetPartitionID(shardID))
+	sd := fmt.Sprintf("snapshot-%d-%d", shardID, replicaID)
 	dir := env.nhConfig.NodeHostDir
 	parts := make([]string, 0)
 	toBeCreated := make([]string, 0)
@@ -175,8 +177,8 @@ func (env *Env) CreateNodeHostDir(did uint64) (string, string, error) {
 
 // CreateSnapshotDir creates the snapshot directory for the specified node.
 func (env *Env) CreateSnapshotDir(did uint64,
-	clusterID uint64, nodeID uint64) error {
-	_, path, parts := env.getSnapshotDirParts(did, clusterID, nodeID)
+	shardID uint64, replicaID uint64) error {
+	_, path, parts := env.getSnapshotDirParts(did, shardID, replicaID)
 	for _, part := range parts {
 		path = env.fs.PathJoin(path, part)
 		exist, err := fileutil.Exist(path, env.fs)
@@ -205,30 +207,67 @@ func (env *Env) NodeHostID() string {
 	return env.nhid.String()
 }
 
-// LoadNodeHostID loads the NodeHost ID value from the ID file. A new ID file
-// will be created with a randomly assigned NodeHostID when running for the
-// first time.
-func (env *Env) LoadNodeHostID() (*id.NodeHostID, error) {
-	dir, _ := env.getDataDirs()
-	nhID := id.NewRandomNodeHostID()
-	if fileutil.HasFlagFile(dir, idFilename, env.fs) {
-		if err := fileutil.GetFlagFileContent(dir,
-			idFilename, nhID, env.fs); err != nil {
-			return nil, err
+// PrepareNodeHostID prepares NodeHostID and stores it in the expected data
+// file.
+func (env *Env) PrepareNodeHostID(nhID string) (*id.UUID, error) {
+	v, err := env.loadNodeHostID()
+	if err != nil {
+		return nil, err
+	}
+	if v != nil {
+		// we already have NodeHostID registered
+		if len(nhID) > 0 {
+			n, err := id.NewUUID(nhID)
+			if err != nil {
+				return nil, err
+			}
+			if v.String() != n.String() {
+				return nil, errors.Wrapf(ErrNodeHostIDChanged, "existing %s, new %s",
+					v.String(), n.String())
+			}
 		}
-	} else {
-		if err := fileutil.CreateFlagFile(dir,
-			idFilename, nhID, env.fs); err != nil {
+		env.nhid = v
+		return v, nil
+	}
+	// we don't have NodeHostID registered
+	v = id.New()
+	if len(nhID) > 0 {
+		v, err = id.NewUUID(nhID)
+		if err != nil {
 			return nil, err
 		}
 	}
-	env.nhid = nhID
-	return nhID, nil
+	if err := env.storeNodeHostID(v); err != nil {
+		return nil, err
+	}
+	env.nhid = v
+	return v, nil
+}
+
+func (env *Env) storeNodeHostID(nhID *id.UUID) error {
+	dir, _ := env.getDataDirs()
+	if fileutil.HasFlagFile(dir, idFilename, env.fs) {
+		panic("trying to overwrite NodeHostID file")
+	}
+	return fileutil.CreateFlagFile(dir, idFilename, nhID, env.fs)
+}
+
+func (env *Env) loadNodeHostID() (*id.UUID, error) {
+	dir, _ := env.getDataDirs()
+	var storedUUID id.UUID
+	if fileutil.HasFlagFile(dir, idFilename, env.fs) {
+		if err := fileutil.GetFlagFileContent(dir,
+			idFilename, &storedUUID, env.fs); err != nil {
+			return nil, err
+		}
+		return &storedUUID, nil
+	}
+	return nil, nil
 }
 
 // SetNodeHostID sets the NodeHostID value recorded in Env. This is typically
 // invoked by tests.
-func (env *Env) SetNodeHostID(nhid *id.NodeHostID) {
+func (env *Env) SetNodeHostID(nhid *id.UUID) {
 	if env.nhid != nil {
 		panic("trying to change NodeHostID")
 	}
@@ -263,14 +302,14 @@ func (env *Env) LockNodeHostDir() error {
 // RemoveSnapshotDir marks the node snapshot directory as removed and have all
 // existing snapshots deleted.
 func (env *Env) RemoveSnapshotDir(did uint64,
-	clusterID uint64, nodeID uint64) error {
-	dir := env.GetSnapshotDir(did, clusterID, nodeID)
+	shardID uint64, replicaID uint64) error {
+	dir := env.GetSnapshotDir(did, shardID, replicaID)
 	exist, err := fileutil.Exist(dir, env.fs)
 	if err != nil {
 		return err
 	}
 	if exist {
-		if err := env.markSnapshotDirRemoved(did, clusterID, nodeID); err != nil {
+		if err := env.markSnapshotDirRemoved(did, shardID, replicaID); err != nil {
 			return err
 		}
 		if err := removeSavedSnapshots(dir, env.fs); err != nil {
@@ -280,9 +319,9 @@ func (env *Env) RemoveSnapshotDir(did uint64,
 	return nil
 }
 
-func (env *Env) markSnapshotDirRemoved(did uint64, clusterID uint64,
-	nodeID uint64) error {
-	dir := env.GetSnapshotDir(did, clusterID, nodeID)
+func (env *Env) markSnapshotDirRemoved(did uint64, shardID uint64,
+	replicaID uint64) error {
+	dir := env.GetSnapshotDir(did, shardID, replicaID)
 	s := &raftpb.RaftDataStatus{}
 	return fileutil.MarkDirAsDeleted(dir, s, env.fs)
 }

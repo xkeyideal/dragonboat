@@ -15,15 +15,17 @@
 package raft
 
 import (
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/settings"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/settings"
 	"math"
 	"reflect"
 	"sort"
 	"testing"
 
-	"github.com/lni/dragonboat/v3/internal/server"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/lni/dragonboat/v4/internal/server"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 //
@@ -233,10 +235,10 @@ func TestOneNodeWithHigherTermAndOneNodeWithMostRecentLogCanCompleteElection(t *
 }
 
 func TestRaftHelperMethods(t *testing.T) {
-	v := NodeID(100)
-	v2 := ClusterID(100)
+	v := ReplicaID(100)
+	v2 := ShardID(100)
 	if v != "n00100" || v2 != "c00100" {
-		t.Errorf("unexpected node id / cluster id value")
+		t.Errorf("unexpected node id / shard id value")
 	}
 	r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewTestLogDB())
 	r.becomeFollower(2, 3)
@@ -246,7 +248,7 @@ func TestRaftHelperMethods(t *testing.T) {
 	addrMap[2] = "address2"
 	addrMap[3] = "address3"
 	status := getLocalStatus(r)
-	if status.IsLeader() || !status.IsFollower() || status.NodeID != 1 {
+	if status.IsLeader() || !status.IsFollower() || status.ReplicaID != 1 {
 		t.Errorf("unexpected status value")
 	}
 }
@@ -372,7 +374,7 @@ func TestBecomeCandidateDragonboat(t *testing.T) {
 	if r.state != candidate {
 		t.Errorf("not in candidate state")
 	}
-	if r.vote != r.nodeID {
+	if r.vote != r.replicaID {
 		t.Errorf("vote not set")
 	}
 	if r.electionTick != 0 {
@@ -918,12 +920,12 @@ func TestWitnessCannotBePromotedToFullMember(t *testing.T) {
 			t.Errorf("Should panic while promoting from witness")
 		}
 	}()
-	nodeID := uint64(1)
-	p := newTestWitness(nodeID, nil, []uint64{1}, 10, 1, NewTestLogDB())
+	replicaID := uint64(1)
+	p := newTestWitness(replicaID, nil, []uint64{1}, 10, 1, NewTestLogDB())
 	if !p.isWitness() {
 		t.Errorf("not an witness")
 	}
-	p.addNode(nodeID)
+	p.addNode(replicaID)
 }
 
 func TestNonWitnessWouldPanicWhenRemoteSnapshotAssumeAsWitness(t *testing.T) {
@@ -1328,7 +1330,7 @@ func TestSetRandomizedElectionTimeout(t *testing.T) {
 	}
 }
 
-func TestMultiNodeClusterCampaign(t *testing.T) {
+func TestMultiNodeShardCampaign(t *testing.T) {
 	r := newTestRaft(1, []uint64{1, 2, 3}, 5, 1, NewTestLogDB())
 	r.becomeFollower(10, 2)
 	ne(r.campaign(), t)
@@ -1348,7 +1350,7 @@ func TestMultiNodeClusterCampaign(t *testing.T) {
 	}
 }
 
-func TestSingleNodeClusterCampaign(t *testing.T) {
+func TestSingleNodeShardCampaign(t *testing.T) {
 	r := newTestRaft(1, []uint64{1}, 5, 1, NewTestLogDB())
 	ne(r.campaign(), t)
 	if len(r.msgs) != 0 {
@@ -1817,7 +1819,7 @@ func TestFullMemberWithOneWitnessCouldMakeProgressWithOneMemberDrop(t *testing.T
 	peers := []*raft{p1, p2, p3, p4}
 	for _, p := range peers {
 		if p.log.committed != committed+1 {
-			t.Errorf("new propose should have committed for member %v", p.nodeID)
+			t.Errorf("new propose should have committed for member %v", p.replicaID)
 		}
 	}
 
@@ -1827,8 +1829,8 @@ func TestFullMemberWithOneWitnessCouldMakeProgressWithOneMemberDrop(t *testing.T
 
 	for _, p := range peers {
 		// Only p3 will lag behind.
-		if p.log.committed != committed+2 && p.nodeID != 3 {
-			t.Errorf("new propose should have committed for member %v", p.nodeID)
+		if p.log.committed != committed+2 && p.replicaID != 3 {
+			t.Errorf("new propose should have committed for member %v", p.replicaID)
 		}
 	}
 }
@@ -2951,7 +2953,7 @@ func TestHandleLeaderHeartbeatResp(t *testing.T) {
 	}
 }
 
-func TestLeaderReadIndexOnSingleNodeCluster(t *testing.T) {
+func TestLeaderReadIndexOnSingleNodeShard(t *testing.T) {
 	r := newTestRaft(1, []uint64{1}, 5, 1, NewTestLogDB())
 	r.becomeCandidate()
 	ne(r.becomeLeader(), t)
@@ -2977,7 +2979,7 @@ func TestLeaderReadIndexOnSingleNodeCluster(t *testing.T) {
 	}
 }
 
-func TestLeaderIgnoreReadIndexWhenClusterCommittedIsUnknown(t *testing.T) {
+func TestLeaderIgnoreReadIndexWhenShardCommittedIsUnknown(t *testing.T) {
 	r := newTestRaft(1, []uint64{1, 2, 3}, 5, 1, NewTestLogDB())
 	r.becomeCandidate()
 	ne(r.becomeLeader(), t)
@@ -3348,4 +3350,106 @@ func TestCastVoteToDifferentNodesIsAllowed(t *testing.T) {
 	if !reflect.DeepEqual(expected, a.msgs[0]) {
 		t.Errorf("unexpected msg")
 	}
+}
+
+func TestHandleLogQuery(t *testing.T) {
+	p := newTestRaft(1, []uint64{1}, 10, 1, NewTestLogDB())
+	assert.NoError(t, p.Handle(pb.Message{From: 1, To: 1, Type: pb.Election}))
+	assert.Equal(t, leader, p.state)
+	committed := p.log.committed
+	for i := 0; i < 10; i++ {
+		assert.NoError(t, p.Handle(pb.Message{
+			From:    1,
+			To:      1,
+			Type:    pb.Propose,
+			Entries: []pb.Entry{{Cmd: []byte("test-data")}},
+		}))
+	}
+	assert.Equal(t, committed+10, p.log.committed)
+	assert.NoError(t, p.Handle(pb.Message{
+		Type: pb.LogQuery,
+		From: 1,
+		To:   committed + 11,
+		Hint: math.MaxUint64,
+	}))
+	entries, err := p.log.getEntries(1, 12, math.MaxUint64)
+	assert.NoError(t, err)
+	expected := &pb.LogQueryResult{
+		FirstIndex: p.log.firstIndex(),
+		LastIndex:  p.log.committed + 1,
+		Error:      nil,
+		Entries:    entries,
+	}
+	assert.Equal(t, expected, p.logQueryResult)
+}
+
+func TestHandleLogQueryWillPanicWhenRepeatedlyCalled(t *testing.T) {
+	p := newTestRaft(1, []uint64{1}, 10, 1, NewTestLogDB())
+	assert.NoError(t, p.Handle(pb.Message{From: 1, To: 1, Type: pb.Election}))
+	assert.Equal(t, leader, p.state)
+	committed := p.log.committed
+	for i := 0; i < 10; i++ {
+		assert.NoError(t, p.Handle(pb.Message{
+			From:    1,
+			To:      1,
+			Type:    pb.Propose,
+			Entries: []pb.Entry{{Cmd: []byte("test-data")}},
+		}))
+	}
+	assert.Equal(t, committed+10, p.log.committed)
+	assert.Nil(t, p.logQueryResult)
+	assert.NoError(t, p.Handle(pb.Message{
+		Type: pb.LogQuery,
+		From: 1,
+		To:   committed + 11,
+		Hint: math.MaxUint64,
+	}))
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("panic not triggered")
+		}
+	}()
+	assert.NotNil(t, p.logQueryResult)
+	assert.NoError(t, p.Handle(pb.Message{
+		Type: pb.LogQuery,
+		From: 1,
+		To:   committed + 11,
+		Hint: math.MaxUint64,
+	}))
+}
+
+func TestHandleLogQueryCanHandleRangeError(t *testing.T) {
+	p := newTestRaft(1, []uint64{1}, 10, 1, NewTestLogDB())
+	assert.NoError(t, p.Handle(pb.Message{From: 1, To: 1, Type: pb.Election}))
+	assert.Equal(t, leader, p.state)
+	committed := p.log.committed
+	for i := 0; i < 10; i++ {
+		assert.NoError(t, p.Handle(pb.Message{
+			From:    1,
+			To:      1,
+			Type:    pb.Propose,
+			Entries: []pb.Entry{{Cmd: []byte("test-data")}},
+		}))
+	}
+	assert.Equal(t, committed+10, p.log.committed)
+	assert.NoError(t, p.Handle(pb.Message{
+		Type: pb.LogQuery,
+		From: 13,
+		To:   14,
+		Hint: math.MaxUint64,
+	}))
+	expected := &pb.LogQueryResult{
+		FirstIndex: p.log.firstIndex(),
+		LastIndex:  p.log.committed + 1,
+		Error:      ErrCompacted,
+		Entries:    nil,
+	}
+	assert.Equal(t, expected, p.logQueryResult)
+}
+
+func TestSetLeaderIDWillSetLeaderInfo(t *testing.T) {
+	r := raft{term: 200}
+	r.setLeaderID(100)
+	assert.Equal(t, uint64(100), r.leaderID)
+	assert.Equal(t, &pb.LeaderUpdate{LeaderID: 100, Term: 200}, r.leaderUpdate)
 }

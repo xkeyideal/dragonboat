@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build dragonboat_monkeytest
 // +build dragonboat_monkeytest
 
 package dragonboat
@@ -19,11 +20,11 @@ package dragonboat
 import (
 	"sync/atomic"
 
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/transport"
-	"github.com/lni/dragonboat/v3/internal/vfs"
-	"github.com/lni/dragonboat/v3/raftio"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/transport"
+	"github.com/lni/dragonboat/v4/internal/vfs"
+	"github.com/lni/dragonboat/v4/raftio"
 )
 
 func ApplyMonkeySettings() {
@@ -44,11 +45,11 @@ func GetTestFS() config.IFS {
 	return vfs.GetTestFS()
 }
 
-// Clusters returns a list of raft nodes managed by the nodehost instance.
-func (nh *NodeHost) Clusters() []*node {
+// Shards returns a list of raft nodes managed by the nodehost instance.
+func (nh *NodeHost) Shards() []*node {
 	result := make([]*node, 0)
 	nh.mu.RLock()
-	nh.mu.clusters.Range(func(k, v interface{}) bool {
+	nh.mu.shards.Range(func(k, v interface{}) bool {
 		result = append(result, v.(*node))
 		return true
 	})
@@ -151,13 +152,13 @@ func (n *node) getMembershipHash() uint64 {
 func (n *node) dumpRaftInfoToLog() {
 	addrMap := make(map[uint64]string)
 	m := n.sm.GetMembership()
-	for nodeID := range m.Addresses {
-		if nodeID == n.nodeID {
-			addrMap[nodeID] = n.getRaftAddress()
+	for replicaID := range m.Addresses {
+		if replicaID == n.replicaID {
+			addrMap[replicaID] = n.getRaftAddress()
 		} else {
-			v, _, err := n.nodeRegistry.Resolve(n.clusterID, nodeID)
+			v, _, err := n.nodeRegistry.Resolve(n.shardID, replicaID)
 			if err == nil {
-				addrMap[nodeID] = v
+				addrMap[replicaID] = v
 			}
 		}
 	}

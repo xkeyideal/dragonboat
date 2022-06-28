@@ -27,14 +27,14 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/lni/goutils/random"
 
-	"github.com/lni/dragonboat/v3/client"
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/fileutil"
-	"github.com/lni/dragonboat/v3/internal/rsm"
-	"github.com/lni/dragonboat/v3/internal/settings"
-	"github.com/lni/dragonboat/v3/logger"
-	pb "github.com/lni/dragonboat/v3/raftpb"
-	sm "github.com/lni/dragonboat/v3/statemachine"
+	"github.com/lni/dragonboat/v4/client"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/fileutil"
+	"github.com/lni/dragonboat/v4/internal/rsm"
+	"github.com/lni/dragonboat/v4/internal/settings"
+	"github.com/lni/dragonboat/v4/logger"
+	pb "github.com/lni/dragonboat/v4/raftpb"
+	sm "github.com/lni/dragonboat/v4/statemachine"
 )
 
 var (
@@ -47,6 +47,8 @@ var (
 )
 
 var (
+	// ErrInvalidOption indicates that the specified option is invalid.
+	ErrInvalidOption = errors.New("invalid option")
 	// ErrInvalidOperation indicates that the requested operation is not allowed.
 	// e.g. making read or write requests on witness node are not allowed.
 	ErrInvalidOperation = errors.New("invalid operation")
@@ -64,46 +66,24 @@ var (
 	// Raft config change operation, ErrSystemBusy means there is already such a
 	// request waiting to be processed.
 	ErrSystemBusy = errors.New("system is too busy try again later")
-	// ErrClusterClosed indicates that the requested cluster is being shut down.
-	ErrClusterClosed = errors.New("raft cluster already closed")
-	// ErrClusterNotInitialized indicates that the requested operation can not be
-	// completed as the involved raft cluster has not been initialized yet.
-	ErrClusterNotInitialized = errors.New("raft cluster not initialized yet")
+	// ErrShardClosed indicates that the requested shard is being shut down.
+	ErrShardClosed = errors.New("raft shard already closed")
+	// ErrShardNotInitialized indicates that the requested operation can not be
+	// completed as the involved raft shard has not been initialized yet.
+	ErrShardNotInitialized = errors.New("raft shard not initialized yet")
 	// ErrTimeout indicates that the operation timed out.
 	ErrTimeout = errors.New("timeout")
 	// ErrCanceled indicates that the request has been canceled.
 	ErrCanceled = errors.New("request canceled")
 	// ErrRejected indicates that the request has been rejected.
 	ErrRejected = errors.New("request rejected")
-	// ErrClusterNotReady indicates that the request has been dropped as the
-	// specified raft cluster is not ready to handle the request. Unknown leader
-	// is the most common cause of this error, trying to use a cluster not fully
-	// initialized is another major cause of ErrClusterNotReady.
-	ErrClusterNotReady = errors.New("request dropped as the cluster is not ready")
+	// ErrShardNotReady indicates that the request has been dropped as the
+	// specified raft shard is not ready to handle the request. Unknown leader
+	// is the most common cause of this Error, trying to use a shard not fully
+	// initialized is another major cause of ErrShardNotReady.
+	ErrShardNotReady = errors.New("request dropped as the shard is not ready")
 	// ErrInvalidTarget indicates that the specified node id invalid.
 	ErrInvalidTarget = errors.New("invalid target node ID")
-	// ErrInvalidNodeHostID indicates that the NodeHost ID value provided is
-	// invalid
-	ErrInvalidNodeHostID = errors.New("invalid NodeHost ID value")
-)
-
-var (
-	// ErrBadKey indicates that the key is bad, retry the request is recommended.
-	//
-	// Deprecated: ErrBadKey is no longer used.
-	ErrBadKey = errors.New("bad key try again later")
-	// ErrPendingLeaderTransferExist has been depredicated, use ErrSystemBusy.
-	//
-	// Deprecated: ErrPendingLeaderTransferExist is deprecated.
-	ErrPendingLeaderTransferExist = ErrSystemBusy
-	// ErrPendingConfigChangeExist has been deprecicated, use ErrSystemBusy.
-	//
-	// Deprecated: ErrPendingConfigChangeExist is deprecated.
-	ErrPendingConfigChangeExist = ErrSystemBusy
-	// ErrPendingSnapshotRequestExist has been deprecated, use ErrSystemBusy.
-	//
-	// Deprecated: ErrPendingSnapshotRequestExist is deprecated.
-	ErrPendingSnapshotRequestExist = ErrSystemBusy
 )
 
 // IsTempError returns a boolean value indicating whether the specified error
@@ -111,11 +91,17 @@ var (
 // input, potentially on a more suitable NodeHost instance.
 func IsTempError(err error) bool {
 	return errors.Is(err, ErrSystemBusy) ||
-		errors.Is(err, ErrClusterClosed) ||
-		errors.Is(err, ErrClusterNotInitialized) ||
-		errors.Is(err, ErrClusterNotReady) ||
+		errors.Is(err, ErrShardClosed) ||
+		errors.Is(err, ErrShardNotInitialized) ||
+		errors.Is(err, ErrShardNotReady) ||
 		errors.Is(err, ErrTimeout) ||
 		errors.Is(err, ErrClosed)
+}
+
+// LogRange defines the range [FirstIndex, lastIndex) of the raft log.
+type LogRange struct {
+	FirstIndex uint64
+	LastIndex  uint64
 }
 
 // RequestResultCode is the result code returned to the client to indicate the
@@ -130,7 +116,16 @@ type RequestResult struct {
 	// instance. Result is only available when making a proposal and the Code
 	// value is RequestCompleted.
 	result         sm.Result
+	entries        []pb.Entry
+	logRange       LogRange
 	snapshotResult bool
+	logQueryResult bool
+}
+
+// RequestOutOfRange returns a boolean value indicating whether the request
+// is out of range.
+func (rr *RequestResult) RequestOutOfRange() bool {
+	return rr.code == requestOutOfRange
 }
 
 // Timeout returns a boolean value indicating whether the request timed out.
@@ -146,14 +141,14 @@ func (rr *RequestResult) Committed() bool {
 
 // Completed returns a boolean value indicating whether the request completed
 // successfully. For proposals, it means the proposal has been committed by the
-// Raft cluster and applied on the local node. For ReadIndex operation, it means
-// the cluster is now ready for a local read.
+// Raft shard and applied on the local node. For ReadIndex operation, it means
+// the shard is now ready for a local read.
 func (rr *RequestResult) Completed() bool {
 	return rr.code == requestCompleted
 }
 
 // Terminated returns a boolean value indicating the request terminated due to
-// the requested Raft cluster is being shut down.
+// the requested Raft shard is being shut down.
 func (rr *RequestResult) Terminated() bool {
 	return rr.code == requestTerminated
 }
@@ -192,9 +187,18 @@ func (rr *RequestResult) SnapshotIndex() uint64 {
 	return rr.result.Value
 }
 
+// RaftLogs returns the raft log query result.
+func (rr *RequestResult) RaftLogs() ([]pb.Entry, LogRange) {
+	if !rr.logQueryResult {
+		panic("not a raft log query result")
+	}
+	return rr.entries, rr.logRange
+}
+
 // GetResult returns the result value of the request. When making a proposal,
 // the returned result is the value returned by the Update method of the
-// IStateMachine instance.
+// IStateMachine instance. Returned result is only valid if the RequestResultCode
+// value is RequestCompleted.
 func (rr *RequestResult) GetResult() sm.Result {
 	return rr.result
 }
@@ -207,6 +211,7 @@ const (
 	requestDropped
 	requestAborted
 	requestCommitted
+	requestOutOfRange
 )
 
 var requestResultCodeName = [...]string{
@@ -217,6 +222,7 @@ var requestResultCodeName = [...]string{
 	"RequestDropped",
 	"RequestAborted",
 	"RequestCommitted",
+	"RequestOutOfRange",
 }
 
 func (c RequestResultCode) String() string {
@@ -287,6 +293,8 @@ type RequestState struct {
 	seriesID       uint64
 	respondedTo    uint64
 	deadline       uint64
+	logRange       LogRange
+	maxSize        uint64
 	readyToRead    ready
 	readyToRelease ready
 	aggrC          chan RequestResult
@@ -442,6 +450,8 @@ func (r *RequestState) Release() {
 			return
 		}
 		r.notifyCommit = false
+		r.logRange = LogRange{}
+		r.maxSize = 0
 		r.deadline = 0
 		r.key = 0
 		r.seriesID = 0
@@ -601,7 +611,7 @@ func (p *pendingSnapshot) close() {
 }
 
 func (p *pendingSnapshot) request(st rsm.SSReqType,
-	path string, override bool, overhead uint64,
+	path string, override bool, overhead uint64, index uint64,
 	timeoutTick uint64) (*RequestState, error) {
 	if timeoutTick == 0 {
 		return nil, ErrTimeoutTooSmall
@@ -612,7 +622,7 @@ func (p *pendingSnapshot) request(st rsm.SSReqType,
 		return nil, ErrSystemBusy
 	}
 	if p.snapshotC == nil {
-		return nil, ErrClusterClosed
+		return nil, ErrShardClosed
 	}
 	ssreq := rsm.SSRequest{
 		Type:               st,
@@ -620,6 +630,7 @@ func (p *pendingSnapshot) request(st rsm.SSReqType,
 		Key:                random.LockGuardedRand.Uint64(),
 		OverrideCompaction: override,
 		CompactionOverhead: overhead,
+		CompactionIndex:    index,
 	}
 	req := &RequestState{
 		key:          ssreq.Key,
@@ -715,7 +726,7 @@ func (p *pendingConfigChange) request(cc pb.ConfigChange,
 		return nil, ErrSystemBusy
 	}
 	if p.confChangeC == nil {
-		return nil, ErrClusterClosed
+		return nil, ErrShardClosed
 	}
 	data := pb.MustMarshal(&cc)
 	ccreq := configChangeRequest{
@@ -838,7 +849,7 @@ func (p *pendingReadIndex) read(timeoutTick uint64) (*RequestState, error) {
 
 	ok, closed := p.requests.add(req)
 	if closed {
-		return nil, ErrClusterClosed
+		return nil, ErrShardClosed
 	}
 	if !ok {
 		return nil, ErrSystemBusy
@@ -972,10 +983,10 @@ func (p *pendingReadIndex) gc(now uint64) {
 	}
 }
 
-func getRng(clusterID uint64, nodeID uint64, shard uint64) *keyGenerator {
+func getRng(shardID uint64, replicaID uint64, shard uint64) *keyGenerator {
 	pid := os.Getpid()
 	nano := time.Now().UnixNano()
-	seedStr := fmt.Sprintf("%d-%d-%d-%d-%d", pid, nano, clusterID, nodeID, shard)
+	seedStr := fmt.Sprintf("%d-%d-%d-%d-%d", pid, nano, shardID, replicaID, shard)
 	m := sha512.New()
 	fileutil.MustWrite(m, []byte(seedStr))
 	sum := m.Sum(nil)
@@ -993,7 +1004,7 @@ func newPendingProposal(cfg config.Config,
 	}
 	for i := uint64(0); i < ps; i++ {
 		p.shards[i] = newPendingProposalShard(cfg, notifyCommit, pool, proposals)
-		p.keyg[i] = getRng(cfg.ClusterID, cfg.NodeID, i)
+		p.keyg[i] = getRng(cfg.ShardID, cfg.ReplicaID, i)
 	}
 	return p
 }
@@ -1093,19 +1104,19 @@ func (p *proposalShard) propose(session *client.Session,
 
 	added, stopped := p.proposals.add(entry)
 	if stopped {
-		plog.Warningf("%s dropped proposal, cluster stopped",
-			dn(p.cfg.ClusterID, p.cfg.NodeID))
+		plog.Warningf("%s dropped proposal, shard stopped",
+			dn(p.cfg.ShardID, p.cfg.ReplicaID))
 		p.mu.Lock()
 		delete(p.pending, entry.Key)
 		p.mu.Unlock()
-		return nil, ErrClusterClosed
+		return nil, ErrShardClosed
 	}
 	if !added {
 		p.mu.Lock()
 		delete(p.pending, entry.Key)
 		p.mu.Unlock()
 		plog.Debugf("%s dropped proposal, overloaded",
-			dn(p.cfg.ClusterID, p.cfg.NodeID))
+			dn(p.cfg.ShardID, p.cfg.ReplicaID))
 		return nil, ErrSystemBusy
 	}
 	return req, nil
@@ -1206,4 +1217,74 @@ func (p *proposalShard) gcAt(now uint64) {
 
 func preparePayload(ct config.CompressionType, cmd []byte) []byte {
 	return rsm.GetEncoded(rsm.ToDioType(ct), cmd, nil)
+}
+
+type pendingRaftLogQuery struct {
+	mu struct {
+		sync.Mutex
+		pending *RequestState
+	}
+}
+
+func newPendingRaftLogQuery() pendingRaftLogQuery {
+	return pendingRaftLogQuery{}
+}
+
+func (p *pendingRaftLogQuery) close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.mu.pending != nil {
+		p.mu.pending.terminated()
+		p.mu.pending = nil
+	}
+}
+
+func (p *pendingRaftLogQuery) add(firstIndex uint64,
+	lastIndex uint64, maxSize uint64) (*RequestState, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.mu.pending != nil {
+		return nil, ErrSystemBusy
+	}
+	req := &RequestState{
+		logRange:   LogRange{FirstIndex: firstIndex, LastIndex: lastIndex},
+		maxSize:    maxSize,
+		CompletedC: make(chan RequestResult, 1),
+	}
+	p.mu.pending = req
+
+	return req, nil
+}
+
+func (p *pendingRaftLogQuery) get() *RequestState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.mu.pending
+}
+
+func (p *pendingRaftLogQuery) returned(outOfRange bool,
+	logRange LogRange, entries []pb.Entry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.mu.pending == nil {
+		panic("no pending raft log query")
+	}
+
+	req := p.mu.pending
+	p.mu.pending = nil
+
+	if outOfRange {
+		req.notify(RequestResult{
+			logQueryResult: true,
+			code:           requestOutOfRange,
+			logRange:       logRange,
+		})
+	} else {
+		req.notify(RequestResult{
+			logQueryResult: true,
+			code:           requestCompleted,
+			logRange:       logRange,
+			entries:        entries,
+		})
+	}
 }

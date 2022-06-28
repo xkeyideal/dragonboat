@@ -15,13 +15,13 @@
 package upgrade310
 
 import (
-	"github.com/lni/dragonboat/v3/config"
-	"github.com/lni/dragonboat/v3/internal/logdb"
-	"github.com/lni/dragonboat/v3/internal/rsm"
-	"github.com/lni/dragonboat/v3/internal/server"
-	"github.com/lni/dragonboat/v3/internal/utils"
-	"github.com/lni/dragonboat/v3/raftio"
-	pb "github.com/lni/dragonboat/v3/raftpb"
+	"github.com/lni/dragonboat/v4/config"
+	"github.com/lni/dragonboat/v4/internal/logdb"
+	"github.com/lni/dragonboat/v4/internal/rsm"
+	"github.com/lni/dragonboat/v4/internal/server"
+	"github.com/lni/dragonboat/v4/internal/utils"
+	"github.com/lni/dragonboat/v4/raftio"
+	pb "github.com/lni/dragonboat/v4/raftpb"
 )
 
 var firstError = utils.FirstError
@@ -82,7 +82,7 @@ func CanUpgradeToV310(nhConfig config.NodeHostConfig) (result bool, err error) {
 		return false, err
 	}
 	for _, ni := range niList {
-		ss, err := ldb.GetSnapshot(ni.ClusterID, ni.NodeID)
+		ss, err := ldb.GetSnapshot(ni.ShardID, ni.ReplicaID)
 		if err != nil {
 			return false, err
 		}
